@@ -9,8 +9,8 @@ module Ast
     , Ctt(..)
     , Name
     , Subst
-    , Substitutable
-    , Introducable
+    , Substitutable(..)
+    , Introducable(..)
     ) where
 
 import Data.Map as Map
@@ -21,45 +21,46 @@ type Name = String
 type Subst = Map Name Val
 
 data Exp = RefExp Name
-         | ConExp Con
-         | TermConsExp Name
          | AppExp Exp Exp
          | FixExp Exp
-         | MatchExp MatchBody                -- We ensure at least one branch by use of 'MatchBody'
          | InvarExp Ctt [Name] Subst Exp Exp
          | LetExp Name Exp Exp
          | SyncExp SyncBody                  -- We ensure at least one branch by use of 'SyncBody'
          | GuardExp Exp Ctt
          | ParExp Exp Exp
          | ValExp Val
+         deriving (Eq, Ord)
          
-data MatchBody = SingleMatch Pat Exp | MultiMatch Pat Exp MatchBody
+data MatchBody = SingleMatch Pat Exp | MultiMatch Pat Exp MatchBody deriving (Eq, Ord)
 
-data SyncBody = SingleSync Sync Exp | MultiSync Sync Exp SyncBody
+data SyncBody = SingleSync Sync Exp | MultiSync Sync Exp SyncBody deriving (Eq, Ord)
 
-data Pat = RefPat Name | TermPat Name [Pat]
+data Pat = RefPat Name | TermPat Name [Pat] deriving (Eq, Ord)
 
 data Sync = ReceiveSync (Either Name Val) Name 
           | SendSync (Either Name Val) Name (Maybe Val)
           | GetSync (Either Name Val) Bool
-          | SetSync (Either Name Val) Bool 
+          | SetSync (Either Name Val) Bool
+          deriving (Eq, Ord)
 
 data Ctt = LandCtt Ctt Ctt 
          | ClockLeqCtt (Either Name Val) Integer -- We account for substitution in clock constraints by use of 'Either'
          | ClockGeqCtt (Either Name Val) Integer --
          | ClockLCtt   (Either Name Val) Integer --
          | ClockGCtt   (Either Name Val) Integer --
+         deriving (Eq, Ord)
 
-data Con = ResetCon | OpenCon
+data Con = ResetCon | OpenCon deriving (Eq, Ord)
 
-data Val = ConVal
-         | TermVal [Val]
-         | MatchVal MatchBody
+data Val = ConVal Con
+         | TermVal Name [Val]
+         | MatchVal MatchBody -- We ensure at least one branch by use of 'MatchBody'
          | ClkVal Integer     -- Integer corresponds to clock ID
          | ReceiveVal Integer -- Integer corresponds to channel ID
          | SendVal Integer    --
          | PinVal Integer     -- Integer corresponds to pin ID
          | WorldVal
+         deriving (Eq, Ord)
 
 
 class Substitutable a where
@@ -67,28 +68,28 @@ class Substitutable a where
     substitute :: a -> Subst -> a
 
 instance Substitutable Exp where
-    fv (RefExp x)             = Set.singleton x
-    fv (AppExp e1 e2)         = fv e1 `Set.union` fv e2
-    fv (FixExp e)             = fv e   
-    fv (MatchExp body)        = fv body
-    fv (InvarExp _ _ _ e1 e2) = fv e1 `Set.union` fv e2
-    fv (LetExp x e1 e2)       = (fv e1 `Set.union` fv e2) `Set.difference` Set.singleton x
-    fv (SyncExp body)         = fv body
-    fv (GuardExp e _)         = fv e
-    fv (ParExp e1 e2)         = fv e1 `Set.union` fv e2
-    fv _                      = Set.empty
+    fv (RefExp x)               = Set.singleton x
+    fv (AppExp e1 e2)           = fv e1 `Set.union` fv e2
+    fv (FixExp e)               = fv e   
+    fv (ValExp (MatchVal body)) = fv body
+    fv (InvarExp _ _ _ e1 e2)   = fv e1 `Set.union` fv e2
+    fv (LetExp x e1 e2)         = (fv e1 `Set.union` fv e2) `Set.difference` Set.singleton x
+    fv (SyncExp body)           = fv body
+    fv (GuardExp e _)           = fv e
+    fv (ParExp e1 e2)           = fv e1 `Set.union` fv e2
+    fv _                        = Set.empty
 
     substitute (RefExp x) subst | x `Map.member` subst = ValExp $ subst ! x
                                 | otherwise            = RefExp x
 
-    substitute (AppExp e1 e2) subst  = AppExp (substitute e1 subst) (substitute e2 subst)
-    substitute (FixExp e) subst      = FixExp $ substitute e subst
-    substitute (MatchExp body) subst = MatchExp $ substitute body subst
+    substitute (AppExp e1 e2) subst               = AppExp (substitute e1 subst) (substitute e2 subst)
+    substitute (FixExp e) subst                   = FixExp $ substitute e subst
+    substitute (ValExp (MatchVal body)) subst     = ValExp $ MatchVal (substitute body subst)
     substitute (InvarExp g xs subst e1 e2) subst' = InvarExp (substitute g subst') xs subst'' (substitute e1 subst') (substitute e2 filtered)
         where
             pred k _ = not (k `Prelude.elem` xs)
             filtered = Map.filterWithKey pred subst'
-            subst''  = subst `Map.union` (Map.map (\v -> TermVal [v]) filtered)
+            subst''  = subst `Map.union` (Map.map (\v -> TermVal "Just" [v]) filtered)
 
     substitute (LetExp x e1 e2) subst | x `Map.member` subst = LetExp x (substitute e1 subst) e2
                                       | otherwise            = LetExp x (substitute e1 subst) (substitute e2 subst)
