@@ -45,9 +45,7 @@ match (TermPat _ ps) e = setbuilder $ Set.toList $ partitionExp e
 
         combinations :: [Set Subst] -> [Subst] -> [Subst]
         combinations [] substs         = substs
-        combinations (set:sets) substs = combinations sets substs'
-            where
-                substs' = Set.fold (\sigma -> (\l -> l ++ (Prelude.map (Map.union sigma) substs))) [] set
+        combinations (set:sets) substs = combinations sets $ Set.fold (\sigma -> (\l -> l ++ (Prelude.map (Map.union sigma) substs))) [] set
 
         setbuilder :: [Val] -> Set Subst
         setbuilder []                                            = Set.empty
