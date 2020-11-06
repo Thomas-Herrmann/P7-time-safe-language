@@ -29,6 +29,7 @@ library
   exposed-modules:
       Ast
     , Translate
+    , Uppaal
   other-modules:
       Paths_translation
   hs-source-dirs:
@@ -36,6 +37,8 @@ library
   build-depends:
       containers
     , base >=4.7 && <5
+    , xml-conduit
+    , text
   default-language: Haskell2010
 
 executable translation-exe
@@ -48,6 +51,7 @@ executable translation-exe
   build-depends:
       base >=4.7 && <5
     , translation
+    , xml-conduit
   default-language: Haskell2010
 
 test-suite translation-test
