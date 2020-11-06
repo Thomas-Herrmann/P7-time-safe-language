@@ -29,28 +29,28 @@ data Exp = RefExp Name
          | GuardExp Exp Ctt
          | ParExp Exp Exp
          | ValExp Val
-         deriving (Eq, Ord)
+         deriving (Eq, Ord, Show)
          
-data MatchBody = SingleMatch Pat Exp | MultiMatch Pat Exp MatchBody deriving (Eq, Ord)
+data MatchBody = SingleMatch Pat Exp | MultiMatch Pat Exp MatchBody deriving (Eq, Ord, Show)
 
-data SyncBody = SingleSync Sync Exp | MultiSync Sync Exp SyncBody deriving (Eq, Ord)
+data SyncBody = SingleSync Sync Exp | MultiSync Sync Exp SyncBody deriving (Eq, Ord, Show)
 
-data Pat = RefPat Name | TermPat Name [Pat] deriving (Eq, Ord)
+data Pat = RefPat Name | TermPat Name [Pat] deriving (Eq, Ord, Show)
 
 data Sync = ReceiveSync (Either Name Val) Name 
           | SendSync (Either Name Val) Name (Maybe Val)
           | GetSync (Either Name Val) Bool
           | SetSync (Either Name Val) Bool
-          deriving (Eq, Ord)
+          deriving (Eq, Ord, Show)
 
 data Ctt = LandCtt Ctt Ctt 
          | ClockLeqCtt (Either Name Val) Integer -- We account for substitution in clock constraints by use of 'Either'
          | ClockGeqCtt (Either Name Val) Integer --
          | ClockLCtt   (Either Name Val) Integer --
          | ClockGCtt   (Either Name Val) Integer --
-         deriving (Eq, Ord)
+         deriving (Eq, Ord, Show)
 
-data Con = ResetCon | OpenCon deriving (Eq, Ord)
+data Con = ResetCon | OpenCon deriving (Eq, Ord, Show)
 
 data Val = ConVal Con
          | TermVal Name [Val]
@@ -60,7 +60,7 @@ data Val = ConVal Con
          | SendVal Integer    --
          | PinVal Integer     -- Integer corresponds to pin ID
          | WorldVal
-         deriving (Eq, Ord)
+         deriving (Eq, Ord, Show)
 
 
 class Substitutable a where
