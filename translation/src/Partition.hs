@@ -75,15 +75,29 @@ partitionExp (AppExp e1 e2) = partitionExp e1 >>= (\set -> foldrM unionApply Set
             return $ Set.map (\v -> TermVal "Triple" [SendVal id, ReceiveVal id, v]) set
 
         matchBody :: MatchBody -> Val -> ParT (Set Val)
-        matchBody (SingleMatch p e) v    = partitionExp $ substitute e (match p v)
-        matchBody (MultiMatch p e rem) v = do 
-            set  <- partitionExp $ substitute e (match p v) 
-            set' <- matchBody rem v
-            return $ set `Set.union` set'
+        matchBody (SingleMatch p e) v =
+            case match p v of
+                Nothing    -> return Set.empty
+                Just sigma -> partitionExp $ substitute e sigma
+        matchBody (MultiMatch p e rem) v =
+            case match p v of
+                Nothing    -> matchBody rem v
+                Just sigma -> do
+                    set  <- partitionExp $ substitute e sigma
+                    set' <- matchBody rem v
+                    return $ set `Set.union` set'
 
 partitionExp _ = mzero
 
 
-match :: Pat -> Val -> Subst
-match (RefPat x) v                  = Map.singleton x v
-match (TermPat _ ps) (TermVal _ vs) = Prelude.foldr (\(p, v) -> (\sigma -> sigma `Map.union` match p v)) Map.empty $ Prelude.zip ps vs
+match :: Pat -> Val -> Maybe Subst
+match (RefPat x) v                                           = Just $ Map.singleton x v
+match (TermPat name1 ps) (TermVal name2 vs) | name1 == name2 = Prelude.foldr accumulator (Just Map.empty) $ Prelude.zip ps vs
+    where
+        accumulator _ Nothing           = Nothing
+        accumulator (p, v) (Just sigma) =
+            case match p v of 
+                Nothing     -> Nothing 
+                Just sigma' -> Just $ sigma `Map.union` sigma'
+
+match _ _ = Nothing

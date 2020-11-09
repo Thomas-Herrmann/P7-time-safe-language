@@ -31,12 +31,17 @@ sys = System { sysDecls = [ "chan pSen, pSen2, rSen, pLig, wgSen, wgRec, rRec;"
              , sysSystemDecls = ["This is a system declaration"]
              , sysQueries = [Query "This is a query" "This is a comment"] }
 
+testE = (LetExp "x" 
+                (GuardExp (RefExp "clk1") (ClockLCtt (Left "clk1") 323)) 
+                (AppExp 
+                        (ValExp (ConVal ResetCon)) 
+                        (RefExp "x")))
 
 main :: IO ()
 --main = do 
 --    print $ show ex
 --    print $ show (partition ex 0)
 --main = Text.XML.writeFile def "test.xml" $ systemToXML sys
-main = case translate (LetExp "x" (ValExp (ConVal OpenCon)) (RefExp "x")) [] [] [] "test" of
+main = case translate testE ["clk1"] [] [] "test" of
         Nothing  -> print "failure"
         Just sys -> Text.XML.writeFile def "test.xml" $ systemToXML sys

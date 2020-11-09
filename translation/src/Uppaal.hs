@@ -18,35 +18,43 @@ import Data.Text as Text
 
 type Declaration = Text
 
-data System = System { sysDecls :: [Declaration]
+data System = System { 
+                       sysDecls :: [Declaration]
                      , sysTemplates :: [Template]
                      , sysSystemDecls :: [Declaration]
                      , sysQueries :: [Query]
-                     }
+                     } 
+                     deriving (Eq, Ord)
 
-data Template = Template { temName :: Text
+data Template = Template { 
+                           temName :: Text
                          , temLocations :: [Location]
                          , temTransitions :: [Transition] 
                          , temDecls :: [Declaration]
                          , temInit :: Text
                          , temFinal :: Text
                          }
+                         deriving (Eq, Ord)
 
-data Location = Location { locId :: Text
+data Location = Location { 
+                           locId :: Text
                          , locLabels :: [Label]
                          , locName :: Maybe Text
                          }
+                         deriving (Eq, Ord)
 
-data Label = Label Kind Text
+data Label = Label Kind Text deriving (Eq, Ord)
 
-data Kind = InvariantKind | GuardKind | AssignmentKind | SyncKind
+data Kind = InvariantKind | GuardKind | AssignmentKind | SyncKind deriving (Eq, Ord)
 
-data Transition = Transition { traSource :: Text
+data Transition = Transition { 
+                               traSource :: Text
                              , traTarget :: Text
                              , traLabels :: [Label]
                              }
+                             deriving (Eq, Ord)
 
-data Query = Query Text Text
+data Query = Query Text Text deriving (Eq, Ord)
 
 
 kindText :: Kind -> Text
