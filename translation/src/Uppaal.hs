@@ -30,6 +30,7 @@ data Template = Template { temName :: Text
                          , temTransitions :: [Transition] 
                          , temDecls :: [Declaration]
                          , temInit :: Text
+                         , temFinal :: Text
                          }
 
 data Location = Location { locId :: Text

@@ -1,7 +1,8 @@
 module Main where
 
 import Ast
-import Partition as P
+import Partition
+import Translate
 
 
 ex = AppExp 

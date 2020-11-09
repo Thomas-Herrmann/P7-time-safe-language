@@ -30,6 +30,7 @@ library
       Ast
     , Uppaal
     , Partition
+    , Translate
   other-modules:
       Paths_translation
   hs-source-dirs:

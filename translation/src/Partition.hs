@@ -1,5 +1,6 @@
 module Partition
     ( Partition.partition
+    , match
     ) where
 
 import Data.Set as Set

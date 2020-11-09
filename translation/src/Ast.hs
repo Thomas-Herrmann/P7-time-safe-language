@@ -58,7 +58,8 @@ data Val = ConVal Con
          | ClkVal Integer     -- Integer corresponds to clock ID
          | ReceiveVal Integer -- Integer corresponds to channel ID
          | SendVal Integer    --
-         | PinVal Integer     -- Integer corresponds to pin ID
+         | InPinVal Integer     -- Integer corresponds to in pin ID
+         | OutPinVal Integer     -- Integer corresponds to out pin ID
          | WorldVal
          deriving (Eq, Ord, Show)
 
