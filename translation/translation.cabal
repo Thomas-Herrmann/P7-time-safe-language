@@ -55,6 +55,7 @@ executable translation-exe
       base >=4.7 && <5
     , translation
     , xml-conduit
+    , containers
   default-language: Haskell2010
 
 test-suite translation-test

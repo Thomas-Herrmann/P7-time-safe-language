@@ -29,7 +29,7 @@ next = State.get >>= (\n -> State.put (n + 1) >> (return n))
 partitionExp :: Exp -> ParT (Set Val)
 partitionExp (ValExp v) = return $ Set.singleton v
 partitionExp (RefExp _) = return Set.empty
-partitionExp (FixExp (ValExp (MatchVal body@(SingleMatch (RefPat _) _)))) = return $ Set.singleton (MatchVal body)
+partitionExp (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) e)))) = partitionExp e
 partitionExp (GuardExp e _)   = partitionExp e
 partitionExp (LetExp x e1 e2) = partitionExp e1 >>= (\set -> foldrM fun Set.empty set)
     where
