@@ -14,10 +14,10 @@ import Partition
 import Uppaal
 
 data TransState = TransState {
-                               uniqueID :: Integer
-                             , tempID   :: Integer
-                             , locID    :: Integer
-                             , clockMap :: Map Val Text
+                               uniqueID  :: Integer
+                             , tempID    :: Integer
+                             , locID     :: Integer
+                             , staticMap :: Map Val Text
                              }
 
 type TransT a = MaybeT (State TransState) a
@@ -25,7 +25,7 @@ type TransT a = MaybeT (State TransState) a
 
 translate :: Exp -> [Name] -> [Name] -> [Name] -> Name -> Maybe System
 translate e clockNames inPinNames outPinNames worldName =
-    case evalState (runMaybeT (translateExp [] e')) initState of
+    case evalState (runMaybeT (translateExp Map.empty [] e')) initState of
         Nothing          -> Nothing
         Just (temp, sys) -> Just sys{ sysTemplates = temp:(sysTemplates sys), sysDecls = clockDecl:(sysDecls sys) }
     where
@@ -37,7 +37,10 @@ translate e clockNames inPinNames outPinNames worldName =
         outPinsSubst = Map.fromList $ Prelude.zip outPinNames $ outPins 0
         worldSubst   = Map.singleton worldName WorldVal
         clockDecl    = Text.pack $ "clock " ++ (", " `List.intercalate` clockNames) ++ ";"
-        initState    = TransState 0 0 0 $ Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
+        clockMap     = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
+        inPinMap     = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
+        outPinMap    = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
+        initState    = TransState 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'           = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` worldSubst
 
 
@@ -73,19 +76,19 @@ translateCtt (LandCtt g1 g2) = do
     return $ Label GuardKind (t1 `Text.append` (Text.pack " and ") `Text.append` t2)
 
 translateCtt (ClockLeqCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" <= " ++ show n)))))
 
 translateCtt (ClockGeqCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" >= " ++ show n)))))
 
 translateCtt (ClockLCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" < " ++ show n)))))
 
 translateCtt (ClockGCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" > " ++ show n)))))
 
 translateCtt _ = mzero
@@ -98,13 +101,13 @@ mergeSystems from (currTemp, currSys) (exisTemp, exisSys) =
     in (newTemp{ temTransitions = temTransitions newTemp ++ newTransitions }, exisSys `joinSys` currSys)
 
 
-translateExp :: [Text] -> Exp -> TransT (Template, System)
-translateExp _ (ValExp _) = nilSystem
-translateExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = nilSystem
+translateExp :: Map Integer (Set Val) -> [Text] -> Exp -> TransT (Template, System)
+translateExp _ _ (ValExp _) = nilSystem
+translateExp _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = nilSystem
 
-translateExp inVars (AppExp e1 e2) = do
-    (temp1, sys1) <- translateExp inVars e1
-    (temp2, sys2) <- translateExp inVars e2
+translateExp receivables inVars (AppExp e1 e2) = do
+    (temp1, sys1) <- translateExp receivables inVars e1
+    (temp2, sys2) <- translateExp receivables inVars e2
     id1           <- nextUniqueID
     case Partition.partition e1 id1 of
         Nothing            -> mzero
@@ -140,14 +143,14 @@ translateExp inVars (AppExp e1 e2) = do
         apply :: Val -> Val -> TransT (Set (Template, System))
         apply (MatchVal body) v2 = do
             es      <- matchBody body v2 
-            systems <- Prelude.sequence $ Prelude.map (translateExp inVars) (Set.toList es)
+            systems <- Prelude.sequence $ Prelude.map (translateExp receivables inVars) (Set.toList es)
             return $ Set.fromList systems
 
         apply (TermVal name vs) v2 = nilSystem >>= (\res -> return (Set.singleton res))
         apply (ConVal ResetCon) v2 = do
             (temp, sys) <- nilSystem
             finalLocID  <- nextLocID
-            t           <- translateClock v2
+            t           <- translateStatic v2
             let label   = Label AssignmentKind $ t `Text.append` (Text.pack " = 0")
             return $ Set.singleton (temp{ temLocations   = (Location finalLocID [] $ Just (Text.cons 'L' finalLocID)):(temLocations temp),
                                           temTransitions = (Transition (temFinal temp) finalLocID [label]):(temTransitions temp),
@@ -155,24 +158,41 @@ translateExp inVars (AppExp e1 e2) = do
 
         apply (ConVal OpenCon)  v2 = nilSystem >>= (\res -> return (Set.singleton res))
 
---translateExp inVars (InvarExp g xs _ e1 e2) = do
+--translateExp receivables inVars (InvarExp g xs _ e1 e2) = do
 --  -- TODO!!
 
-translateExp inVars (LetExp x e1 e2) = do
-    (temp1, sys1) <- translateExp inVars e1
+translateExp receivables inVars (LetExp x e1 e2) = do
+    (temp1, sys1) <- translateExp receivables inVars e1
     id1           <- nextUniqueID
     case Partition.partition e1 id1 of
         Nothing            -> mzero
         Just (vals1, id1') -> do
             setUniqueID id1'
-            systems      <- Prelude.sequence [translateExp inVars (substitute e2 (Map.singleton x v)) | v <- Set.toList vals1]   
+            systems      <- Prelude.sequence [translateExp receivables inVars (substitute e2 (Map.singleton x v)) | v <- Set.toList vals1]   
             finalLocID   <- nextLocID
             let finalLoc = Location finalLocID [] $ Just (Text.cons 'L' finalLocID)
             return $ Prelude.foldr (mergeSystems (temFinal temp1)) (temp1{ temFinal = finalLocID, temLocations = finalLoc:(temLocations temp1) }, sys1) systems
 
-translateExp inVars (GuardExp e g) = do
+translateExp receivables inVars (SyncExp body) = do
+    (temp, sys)  <- nilSystem
+    finalLocID   <- nextLocID
+    let finalLoc = Location finalLocID [] $ Just (Text.cons 'L' finalLocID)
+    systems      <- translateBody (temFinal temp) body
+    return $ Prelude.foldr (mergeSystems (temFinal temp)) (temp{ temFinal = finalLocID, temLocations = finalLoc:(temLocations temp) }, sys) systems
+    where
+        translateBody from (SingleSync (ReceiveSync (Right ch@(ReceiveVal id)) x) e) | id `Map.member` receivables = do 
+            systems <- Prelude.sequence [translateExp receivables inVars (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
+            channelName <- translateStatic ch
+            let label = Label SyncKind $ channelName `Text.append` (Text.pack "?") -- TODO: kun den her varierer; så hold dem samlet!
+            let addGuard (temp, sys) = (temp{ temTransitions = (Transition from (temInit temp) [label]):(temTransitions temp) }, sys)
+            return $ Prelude.map addGuard systems
+
+        --translateBody from (MultiSync q e rem) = -- TODO!!
+        translateBody _ _ = return []
+
+translateExp receivables inVars (GuardExp e g) = do
     guard          <- translateCtt g
-    (temp, sys)    <- translateExp inVars e
+    (temp, sys)    <- translateExp receivables inVars e
     initLocID      <- nextLocID
     let prevInitID = temInit temp
     let initLoc    = Location initLocID [] $ Just (Text.cons 'L' initLocID)
@@ -181,10 +201,10 @@ translateExp inVars (GuardExp e g) = do
                   temInit        = initLocID }, sys)
 
 
-translateClock :: Val -> TransT Text
-translateClock v = do
+translateStatic :: Val -> TransT Text
+translateStatic v = do
     state <- State.get
-    case Map.lookup v $ clockMap state of
+    case Map.lookup v $ staticMap state of
         Nothing -> mzero
         Just t  -> return t
 
