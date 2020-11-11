@@ -1,6 +1,7 @@
 module Example where
 
 import Ast
+import qualified Data.Map as Map
 
 tcTrue = TermVal "true" []
 tcFalse = TermVal "false" []
@@ -72,5 +73,21 @@ bodyR2 = LetExp "pLig" (SyncExp $ SingleSync (SetSync (Left "pLig") False) (RefE
               SingleSync (ReceiveSync (Left "rRec") "x") $ LetExp "clkX'" (AppExp (ValExp $ ConVal ResetCon) (RefExp "clkX")) $
                   GuardExp (callLoop (map RefExp ["clkX'", "clkY", "pSen", "pLig'", "wgSen", "wgRec", "rSen", "rRec"] ++ [ValExp tcG1, RefExp "ow"])) (ClockLCtt (Left "clkX") 15)
 
-bodyG1 = RefExp "todo"
-bodyG2 = RefExp "todo"
+bodyG1 = LetExp "pLig" (SyncExp $ SingleSync (SetSync (Left "pLig") True) (RefExp "pLig")) $ 
+    patLetExp (TermPat "quad" [RefPat "state'", RefPat "pSen'", RefPat "wgSen'", RefPat "clkX'"]) 
+        (InvarExp (ClockLCtt (Left "clkX") 15) ["x", "y"] Map.empty 
+            (SyncExp $ MultiSync (GetSync (Left "pSen") True) (constructTuple "quad" [ValExp $ tcG1, RefExp "pSen", RefExp "wgRec", RefExp "clkX"]) $
+                       SingleSync (ReceiveSync (Left "wgRec") "y") (constructTuple "quad" [ValExp $ tcG2, RefExp "pSen", RefExp "wgRec", RefExp "clkX"])) 
+            (LetExp "clkX'" (AppExp (ValExp $ ConVal $ ResetCon) (RefExp "clkX")) 
+                (GuardExp (constructTuple "quad" [ValExp tcR1, RefExp "pSen", RefExp "wgRec", RefExp "clkX'"]) (ClockGeqCtt (Left "clkX'") 3)))) 
+        (callLoop $ [loopClkX] ++ (map RefExp ["clkY", "pSen'", "pLig'", "wgSen'", "wgRec'", "rSen", "rRec", "state'", "ow"]))
+            where loopClkX = ValExp $ MatchVal $ MultiMatch (TermPat "G1" []) (AppExp (ValExp $ ConVal $ ResetCon) (RefExp "clkX''")) (SingleMatch (TermPat "G2" []) (RefExp "clkX''"))
+
+bodyG2 = LetExp "pLig" (SyncExp $ SingleSync (SetSync (Left "pLig") True) (RefExp "pLig")) $ 
+    patLetExp (TermPat "triple" [RefPat "state'", RefPat "pSen'", RefPat "clkX'"]) 
+        (InvarExp (LandCtt (ClockLCtt (Left "clkX") 15) (ClockLCtt (Left "clkY") 55)) ["x"] Map.empty 
+            (SyncExp $ SingleSync (GetSync (Left "pSen") True) (constructTuple "triple" [ValExp tcG2, RefExp "pSen", RefExp "clkX"])) 
+            (LetExp "clkX'" (AppExp (ValExp $ ConVal $ ResetCon) (RefExp "clkX")) $
+                GuardExp (constructTuple "triple" [ValExp tcR1, RefExp "pSen", RefExp "clkX"]) (ClockGeqCtt (Left "clkX") 3))) 
+        (callLoop $ [loopClkX] ++ (map RefExp ["clkY", "pSen'", "pLig'", "wgSen", "wgRec", "rSen", "rRec", "state'", "ow"]))
+            where loopClkX = AppExp (ValExp $ ConVal $ ResetCon) (RefExp "clkX''")
