@@ -14,10 +14,11 @@ import Partition
 import Uppaal
 
 data TransState = TransState {
-                               uniqueID :: Integer
-                             , tempID   :: Integer
-                             , locID    :: Integer
-                             , clockMap :: Map Val Text
+                               uniqueID  :: Integer
+                             , tempID    :: Integer
+                             , locID     :: Integer
+                             , gVarID    :: Integer
+                             , staticMap :: Map Val Text
                              }
 
 type TransT a = MaybeT (State TransState) a
@@ -25,7 +26,7 @@ type TransT a = MaybeT (State TransState) a
 
 translate :: Exp -> [Name] -> [Name] -> [Name] -> Name -> Maybe System
 translate e clockNames inPinNames outPinNames worldName =
-    case evalState (runMaybeT (translateExp [] e')) initState of
+    case evalState (runMaybeT (translateExp Map.empty Map.empty [] e')) initState of
         Nothing          -> Nothing
         Just (temp, sys) -> Just sys{ sysTemplates = temp:(sysTemplates sys), sysDecls = clockDecl:(sysDecls sys) }
     where
@@ -37,7 +38,10 @@ translate e clockNames inPinNames outPinNames worldName =
         outPinsSubst = Map.fromList $ Prelude.zip outPinNames $ outPins 0
         worldSubst   = Map.singleton worldName WorldVal
         clockDecl    = Text.pack $ "clock " ++ (", " `List.intercalate` clockNames) ++ ";"
-        initState    = TransState 0 0 0 $ Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
+        clockMap     = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
+        inPinMap     = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
+        outPinMap    = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
+        initState    = TransState 0 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'           = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` worldSubst
 
 
@@ -73,19 +77,19 @@ translateCtt (LandCtt g1 g2) = do
     return $ Label GuardKind (t1 `Text.append` (Text.pack " and ") `Text.append` t2)
 
 translateCtt (ClockLeqCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" <= " ++ show n)))))
 
 translateCtt (ClockGeqCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" >= " ++ show n)))))
 
 translateCtt (ClockLCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" < " ++ show n)))))
 
 translateCtt (ClockGCtt (Right v) n) = 
-    translateClock v >>= 
+    translateStatic v >>= 
         (\t -> return (Label GuardKind (t `Text.append` (Text.pack (" > " ++ show n)))))
 
 translateCtt _ = mzero
@@ -98,21 +102,27 @@ mergeSystems from (currTemp, currSys) (exisTemp, exisSys) =
     in (newTemp{ temTransitions = temTransitions newTemp ++ newTransitions }, exisSys `joinSys` currSys)
 
 
-translateExp :: [Text] -> Exp -> TransT (Template, System)
-translateExp _ (ValExp _) = nilSystem
-translateExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = nilSystem
+translateExp :: Map Name Text -> Map Integer (Set Val) -> [Text] -> Exp -> TransT (Template, System)
+translateExp _ _ _ (ValExp _) = nilSystem
 
-translateExp inVars (AppExp e1 e2) = do
-    (temp1, sys1) <- translateExp inVars e1
-    (temp2, sys2) <- translateExp inVars e2
+translateExp recVars receivables inVars (FixExp (ValExp (MatchVal (SingleMatch (RefPat x) e)))) = do
+    (temp1, sys1) <- nilSystem
+    let recVars'  = Map.insert x (temInit temp1) recVars
+    (temp2, sys2) <- translateExp recVars' receivables inVars e
+    let temp3 = temp1 `joinTemp` temp2
+    return (temp3{ temTransitions = (Transition (temFinal temp1) (temInit temp2) []):(temTransitions temp3) }, sys1 `joinSys` sys2)
+
+translateExp recVars receivables inVars (AppExp e1 e2) = do
+    (temp1, sys1) <- translateExp recVars receivables inVars e1
+    (temp2, sys2) <- translateExp recVars receivables inVars e2
     id1           <- nextUniqueID
     case Partition.partition e1 id1 of
-        Nothing            -> mzero
+        Nothing          -> mzero
         Just (vs1, id1') -> do
             setUniqueID id1'
             id2 <- nextUniqueID
             case Partition.partition e2 id2 of
-                Nothing            -> mzero
+                Nothing          -> mzero
                 Just (vs2, id2') -> do
                     setUniqueID id2'
                     systemSets   <- Prelude.sequence [apply v1 v2 | v1 <- Set.toList vs1, v2 <- Set.toList vs2]
@@ -140,14 +150,14 @@ translateExp inVars (AppExp e1 e2) = do
         apply :: Val -> Val -> TransT (Set (Template, System))
         apply (MatchVal body) v2 = do
             es      <- matchBody body v2 
-            systems <- Prelude.sequence $ Prelude.map (translateExp inVars) (Set.toList es)
+            systems <- Prelude.sequence $ Prelude.map (translateExp recVars receivables inVars) (Set.toList es)
             return $ Set.fromList systems
 
         apply (TermVal name vs) v2 = nilSystem >>= (\res -> return (Set.singleton res))
         apply (ConVal ResetCon) v2 = do
             (temp, sys) <- nilSystem
             finalLocID  <- nextLocID
-            t           <- translateClock v2
+            t           <- translateStatic v2
             let label   = Label AssignmentKind $ t `Text.append` (Text.pack " = 0")
             return $ Set.singleton (temp{ temLocations   = (Location finalLocID [] $ Just (Text.cons 'L' finalLocID)):(temLocations temp),
                                           temTransitions = (Transition (temFinal temp) finalLocID [label]):(temTransitions temp),
@@ -155,24 +165,49 @@ translateExp inVars (AppExp e1 e2) = do
 
         apply (ConVal OpenCon)  v2 = nilSystem >>= (\res -> return (Set.singleton res))
 
---translateExp inVars (InvarExp g xs _ e1 e2) = do
+--translateExp recVars receivables inVars (InvarExp g xs _ e1 e2) = do
 --  -- TODO!!
 
-translateExp inVars (LetExp x e1 e2) = do
-    (temp1, sys1) <- translateExp inVars e1
+translateExp recVars receivables inVars (LetExp x e1 e2) = do
+    (temp1, sys1) <- translateExp recVars receivables inVars e1
     id1           <- nextUniqueID
     case Partition.partition e1 id1 of
         Nothing            -> mzero
         Just (vals1, id1') -> do
             setUniqueID id1'
-            systems      <- Prelude.sequence [translateExp inVars (substitute e2 (Map.singleton x v)) | v <- Set.toList vals1]   
+            systems      <- Prelude.sequence [translateExp recVars receivables inVars (substitute e2 (Map.singleton x v)) | v <- Set.toList vals1]   
             finalLocID   <- nextLocID
             let finalLoc = Location finalLocID [] $ Just (Text.cons 'L' finalLocID)
             return $ Prelude.foldr (mergeSystems (temFinal temp1)) (temp1{ temFinal = finalLocID, temLocations = finalLoc:(temLocations temp1) }, sys1) systems
 
-translateExp inVars (GuardExp e g) = do
+translateExp recVars receivables inVars (SyncExp body) = do
+    (temp, sys)  <- nilSystem
+    finalLocID   <- nextLocID
+    let finalLoc = Location finalLocID [] $ Just (Text.cons 'L' finalLocID)
+    systems      <- translateBody (temFinal temp) body
+    return $ Prelude.foldr (mergeSystems (temFinal temp)) (temp{ temFinal = finalLocID, temLocations = finalLoc:(temLocations temp) }, sys) systems
+    where
+        translateBody from (SingleSync q e)    = translateSyncPair from q e
+        translateBody from (MultiSync q e rem) = do 
+            systems  <- translateSyncPair from q e
+            systems' <- translateBody from rem
+            return $ systems ++ systems'
+
+        translateSyncPair from q@(ReceiveSync (Right ch@(ReceiveVal id)) x) e | id `Map.member` receivables = do
+            systems     <- Prelude.sequence [translateExp recVars receivables inVars (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
+            label       <- translateSync q
+            let addGuard (temp, sys) = (temp{ temTransitions = (Transition from (temInit temp) [label]):(temTransitions temp) }, sys)
+            return $ Prelude.map addGuard systems
+
+        translateSyncPair from q e = do
+            (temp, sys) <- translateExp recVars receivables inVars e
+            label       <- translateSync q
+            return $ [(temp{ temTransitions = (Transition from (temInit temp) [label]):(temTransitions temp) }, sys)]
+
+
+translateExp recVars receivables inVars (GuardExp e g) = do
     guard          <- translateCtt g
-    (temp, sys)    <- translateExp inVars e
+    (temp, sys)    <- translateExp recVars receivables inVars e
     initLocID      <- nextLocID
     let prevInitID = temInit temp
     let initLoc    = Location initLocID [] $ Just (Text.cons 'L' initLocID)
@@ -180,19 +215,85 @@ translateExp inVars (GuardExp e g) = do
                   temTransitions = (Transition initLocID prevInitID [guard]):(temTransitions temp), 
                   temInit        = initLocID }, sys)
 
+translateExp recVars receivables inVars (ParExp e1 e2) = do
+    id1 <- nextUniqueID
+    case sends e1 id1 of
+        Nothing                 -> mzero
+        Just (sendables1, id1') -> do
+            setUniqueID id1'
+            id2 <- nextUniqueID
+            case sends e2 id2 of
+                Nothing                 -> mzero
+                Just (sendables2, id2') -> do
+                    setUniqueID id2'
+                    (temp1, sys1)    <- translateExp recVars ((receivables `Map.union` sendables2) `Map.difference` sendables1) inVars e1
+                    (temp2, sys2)    <- translateExp recVars ((receivables `Map.union` sendables1) `Map.difference` sendables2) inVars e2
+                    (tempMain, sys3) <- nilSystem
+                    let sys4         = sys1 `joinSys` sys2 `joinSys` sys3
+                    startID          <- nextVarID
+                    stopID1          <- nextVarID
+                    stopID2          <- nextVarID
+                    temp1'           <- addGuards temp1 [varText "start" startID] [varText "stop" stopID1]
+                    temp2'           <- addGuards temp2 [varText "start" startID] [varText "stop" stopID2]
+                    tempMain''       <- addGuards (flipStartStop tempMain) [varText "stop" stopID1, varText "stop" stopID2] [varText "start" startID]
+                    let tempMain'    = flipStartStop tempMain''
+                    let varDecl      = Text.pack $ "bool " ++ "start" ++ show startID ++ " = 0, stop" ++ show stopID1 ++ " = 0, stop" ++ show stopID2 ++ " = 0;"
+                    return (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], sysDecls = varDecl:(sysDecls sys4) })
+    where
+        varText s id = Text.pack (s ++ show id)
+        flipStartStop temp = temp{ temInit = temFinal temp, temFinal = temInit temp }
 
-translateClock :: Val -> TransT Text
-translateClock v = do
+        addGuards temp varStarts varStops = do
+            initLocID       <- nextLocID
+            let initLoc     = Location initLocID [] $ Just (Text.cons 'L' initLocID)
+            finalLocID      <- nextLocID
+            let finalLoc    = Location finalLocID [] $ Just (Text.cons 'L' finalLocID)
+            let startLabels = Prelude.map (\varStart -> Label GuardKind $ varStart `Text.append` (Text.pack " == 1")) varStarts
+            let endLabels   = Prelude.map (\varStop -> Label AssignmentKind $ varStop `Text.append` (Text.pack " := 1")) varStops
+            let newTrans    = [Transition initLocID (temInit temp) startLabels, Transition (temFinal temp) finalLocID endLabels]
+            return $ temp{ temInit = initLocID, 
+                           temFinal = finalLocID, 
+                           temLocations = temLocations temp ++ [initLoc, finalLoc], 
+                           temTransitions = temTransitions temp ++ newTrans }
+
+translateStatic :: Val -> TransT Text
+translateStatic v = do
     state <- State.get
-    case Map.lookup v $ clockMap state of
+    case Map.lookup v $ staticMap state of
         Nothing -> mzero
         Just t  -> return t
+
+
+translateSync ::  Sync -> TransT Label
+translateSync (ReceiveSync (Right ch@(ReceiveVal id)) x) = do 
+    channelName <- translateStatic ch
+    return $ Label SyncKind $ channelName `Text.append` (Text.pack "?")
+
+translateSync (SendSync (Right ch@(SendVal id)) x (Just v)) = do 
+    channelName <- translateStatic ch
+    return $ Label SyncKind $ channelName `Text.append` (Text.pack "!")
+
+translateSync (GetSync (Right pn@(InPinVal _)) b) = do
+    pinName <- translateStatic pn
+    return $ Label GuardKind $ pinName `Text.append` (Text.pack (" == " ++ if b then "1" else "0"))
+
+translateSync (SetSync (Right pn@(OutPinVal _)) b) = do
+    pinName <- translateStatic pn
+    return $ Label AssignmentKind $ pinName `Text.append` (Text.pack (" := " ++ if b then "1" else "0"))
+
+translateSync _ = mzero
 
 
 nextUniqueID :: TransT Integer
 nextUniqueID = State.get >>= 
     (\state -> State.put state{ uniqueID = ((uniqueID state) + 1) } >> 
     (return (uniqueID state)))
+
+
+nextVarID :: TransT Integer
+nextVarID = State.get >>= 
+    (\state -> State.put state{ gVarID = ((gVarID state) + 1) } >> 
+    (return (gVarID state)))
 
 
 setUniqueID :: Integer -> TransT ()

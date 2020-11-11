@@ -1,6 +1,7 @@
 module Partition
     ( Partition.partition
     , match
+    , sends
     ) where
 
 import Data.Set as Set
@@ -28,7 +29,7 @@ next = State.get >>= (\n -> State.put (n + 1) >> (return n))
 partitionExp :: Exp -> ParT (Set Val)
 partitionExp (ValExp v) = return $ Set.singleton v
 partitionExp (RefExp _) = return Set.empty
-partitionExp (FixExp (ValExp (MatchVal body@(SingleMatch (RefPat _) _)))) = return $ Set.singleton (MatchVal body)
+partitionExp (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) e)))) = partitionExp e
 partitionExp (GuardExp e _)   = partitionExp e
 partitionExp (LetExp x e1 e2) = partitionExp e1 >>= (\set -> foldrM fun Set.empty set)
     where
@@ -101,3 +102,69 @@ match (TermPat name1 ps) (TermVal name2 vs) | name1 == name2 = Prelude.foldr acc
                 Just sigma' -> Just $ sigma `Map.union` sigma'
 
 match _ _ = Nothing
+
+sends :: Exp -> Integer -> Maybe (Map Integer (Set Val), Integer)
+sends e n = 
+    case runState (runMaybeT (sendsExp e)) n of
+        (Nothing, _)  -> Nothing
+        (Just set, s) -> Just (set, s)
+
+sendsExp ::  Exp -> ParT (Map Integer (Set Val))
+sendsExp (ValExp _)     = return Map.empty
+sendsExp (AppExp e1 e2) = do 
+    map1 <- sendsExp e1 
+    map2 <- sendsExp e2
+    vs1  <- partitionExp e1
+    vs2  <- partitionExp e2
+    map3 <- applySends (Set.toList vs1) (Set.toList vs2)
+    return $ (Map.unionWith Set.union) ((Map.unionWith Set.union) map1 map2) map3
+    where
+        getExps (MatchVal body) v2 = matchBody body v2
+        getExps _ _                = Set.empty
+
+        matchBody (SingleMatch p e) v =
+            case match p v of
+                Nothing    -> Set.empty
+                Just sigma -> Set.singleton $ substitute e sigma
+
+        matchBody (MultiMatch p e rem) v = 
+            case match p v of
+                Nothing    -> matchBody rem v
+                Just sigma -> Set.singleton (substitute e sigma) `Set.union` matchBody rem v
+
+        applySends vs1 vs2 = do
+            let es = Prelude.foldr Set.union Set.empty [getExps v1 v2 | v1 <- vs1, v2 <- vs2]
+            maps   <- Prelude.sequence $ Prelude.map sendsExp $ Set.toList es
+            return $ Prelude.foldr (Map.unionWith Set.union) Map.empty maps
+
+    
+sendsExp (FixExp (ValExp (MatchVal body@(SingleMatch (RefPat _) _)))) = return Map.empty
+
+sendsExp (InvarExp _ xs _ e1 e2) = do 
+    map1 <- sendsExp e1
+    map2 <- sendsExp e2 
+    return $ (Map.unionWith Set.union) map1 map2 -- TODO: substitute in e2 (xs (maybe..))
+
+sendsExp (LetExp x e1 e2) = do 
+    map1    <- sendsExp e1
+    vs1     <- partitionExp e1
+    mapList <- Prelude.sequence [sendsExp (substitute e2 (Map.singleton x v)) | v <- Set.toList vs1]
+    return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
+
+sendsExp (SyncExp body) = return $ sendsBody body -- TODO: multiple passes!
+    where
+        sendsBody :: SyncBody -> Map Integer (Set Val)
+        sendsBody (SingleSync (SendSync (Right (SendVal id)) x (Just v)) e)    = Map.singleton id $ Set.singleton v 
+        sendsBody (MultiSync (SendSync (Right (SendVal id)) x (Just v)) e rem) = (Map.unionWith Set.union) (Map.singleton id (Set.singleton v)) (sendsBody rem)
+        sendsBody (MultiSync q e rem)                           = sendsBody rem
+        sendsBody _                                             = Map.empty
+
+
+sendsExp (GuardExp e _) = sendsExp e
+
+sendsExp (ParExp e1 e2) = do 
+    map1 <- sendsExp e1 
+    map2 <- sendsExp e2
+    return $ (Map.unionWith Set.union) map1 map2
+
+
