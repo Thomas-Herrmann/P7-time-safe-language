@@ -3,6 +3,7 @@
 module Main where
 
 import Data.Map as Map
+import Data.Set as Set
 import Text.XML
 import Ast
 import Partition
@@ -51,10 +52,12 @@ testE2 = (AppExp
 testE2' = (AppExp 
                 (ValExp (MatchVal (SingleMatch 
                         (TermPat "Triple" [RefPat "ch", RefPat "ch'", RefPat "w'"]) 
-                        (RefExp "clk1")))) 
+                        (SyncExp (SingleSync (SendSync (Left "ch") "clk1" Nothing) (ValExp (ConVal ResetCon)))) ))) 
                 (AppExp 
                         (ValExp (ConVal OpenCon)) 
                         (RefExp "w")))
+
+testE2'' = (SyncExp (SingleSync (SendSync (Right (SendVal 1)) "clk1" Nothing) (RefExp "clk1")))
 
 main :: IO ()
 --main = do 
