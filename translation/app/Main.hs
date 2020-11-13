@@ -51,21 +51,20 @@ testE2 = (AppExp
 
 testE2' = (AppExp 
                 (ValExp (MatchVal (SingleMatch 
-                        (TermPat "Triple" [RefPat "ch", RefPat "ch'", RefPat "w'"]) 
-                        (SyncExp (SingleSync (SendSync (Left "ch") "clk1" Nothing) (ValExp (ConVal ResetCon)))) ))) 
+                        (TermPat "Triple" [RefPat "ch", RefPat "ch'", RefPat "w'"])
+                        (FixExp (ValExp (MatchVal (SingleMatch (RefPat "f") 
+                                (AppExp ((ParExp 
+                                (SyncExp (SingleSync (ReceiveSync (Left "ch'") "res") (ValExp (ConVal ResetCon)))) 
+                                (SyncExp (SingleSync (SendSync (Left "ch") "clk1" Nothing) (ValExp (ConVal ResetCon))))))
+                                (RefExp "f"))))))))) 
                 (AppExp 
                         (ValExp (ConVal OpenCon)) 
                         (RefExp "w")))
 
-testE2'' = (SyncExp (SingleSync (SendSync (Right (SendVal 1)) "clk1" Nothing) (RefExp "clk1")))
+testE2'' = InvarExp (ClockLeqCtt (Left "clk1") 25) [] Map.empty testE2 $ (ValExp (ConVal ResetCon))
 
 main :: IO ()
---main = do 
---    print $ show ex
---    print $ show (partition ex 0)
---main = Text.XML.writeFile def "test.xml" $ systemToXML sys
-main = do
-        print $ substitute testE2 (Map.singleton "clk1" (ClkVal 1)) -- TODO: hmm
-        case translate testE2 ["clk1"] [] [] "w" of
-                Nothing  -> print "failure"
-                Just sys -> Text.XML.writeFile def "test.xml" $ systemToXML sys
+main =
+   case translate testE2'' ["clk1"] [] [] "w" of
+      Nothing  -> print "failure"
+      Just sys -> Text.XML.writeFile def "test.xml" $ systemToXML sys

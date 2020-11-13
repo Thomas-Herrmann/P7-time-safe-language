@@ -11,6 +11,7 @@ module Ast
     , Subst
     , Substitutable(..)
     , Introducable(..)
+    , negateCtt
     ) where
 
 import Data.Map as Map
@@ -44,11 +45,22 @@ data Sync = ReceiveSync (Either Name Val) Name
           deriving (Eq, Ord, Show)
 
 data Ctt = LandCtt Ctt Ctt 
+         | LorCtt Ctt Ctt
          | ClockLeqCtt (Either Name Val) Integer -- We account for substitution in clock constraints by use of 'Either'
          | ClockGeqCtt (Either Name Val) Integer --
          | ClockLCtt   (Either Name Val) Integer --
          | ClockGCtt   (Either Name Val) Integer --
          deriving (Eq, Ord, Show)
+
+
+negateCtt :: Ctt -> Ctt
+negateCtt (LandCtt g1 g2)     = LorCtt (negateCtt g1) (negateCtt g2)
+negateCtt (LorCtt g1 g2)      = LandCtt (negateCtt g1) (negateCtt g2)
+negateCtt (ClockLeqCtt clk n) = ClockGCtt clk n
+negateCtt (ClockGeqCtt clk n) = ClockLCtt clk n
+negateCtt (ClockLCtt clk n)   = ClockGeqCtt clk n
+negateCtt (ClockGCtt clk n)   = ClockLeqCtt clk n
+
 
 data Con = ResetCon | OpenCon deriving (Eq, Ord, Show)
 
@@ -148,6 +160,7 @@ instance Substitutable Sync where
 
 instance Substitutable Ctt where
     fv (LandCtt g1 g2)          = fv g1 `Set.union` fv g2
+    fv (LorCtt g1 g2)           = fv g1 `Set.union` fv g2
     fv (ClockLeqCtt (Left x) _) = Set.singleton x
     fv (ClockGeqCtt (Left x) _) = Set.singleton x
     fv (ClockLCtt (Left x) _)   = Set.singleton x
@@ -155,6 +168,7 @@ instance Substitutable Ctt where
     fv _                        = Set.empty
 
     substitute (LandCtt g1 g2) subst                                 = LandCtt (substitute g1 subst) (substitute g2 subst)
+    substitute (LorCtt g1 g2) subst                                  = LorCtt (substitute g1 subst) (substitute g2 subst)
     substitute (ClockLeqCtt (Left x) n) subst | x `Map.member` subst = ClockLeqCtt (Right (subst ! x)) n
     substitute (ClockGeqCtt (Left x) n) subst | x `Map.member` subst = ClockGeqCtt (Right (subst ! x)) n
     substitute (ClockLCtt (Left x) n) subst   | x `Map.member` subst = ClockLCtt (Right (subst ! x)) n
