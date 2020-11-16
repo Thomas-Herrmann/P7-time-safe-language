@@ -92,12 +92,13 @@ instance Renderable Template where
         )
 
 instance Renderable Location where
-    toXML loc = NodeElement $ Element "location" (Map.singleton "id" (locId loc)) 
-        (Prelude.map toXML (locLabels loc) ++
-         case locName loc of
-             Just name -> [textNode "name" name]
-             Nothing -> []
-        )
+    toXML loc = NodeElement $ Element "location" (Map.singleton "id" (locId loc)) $ 
+                nameList ++ Prelude.map toXML (locLabels loc)
+        where
+            nameList =
+                case locName loc of
+                    Just name -> [textNode "name" name]
+                    Nothing -> []
         
 instance Renderable Label where
     toXML (Label kind content) = textNodeAttr "label" (Map.singleton "kind" (kindText kind)) content 
