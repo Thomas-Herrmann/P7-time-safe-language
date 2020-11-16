@@ -131,7 +131,7 @@ mergeSystems from (currTemp, currSys) (exisTemp, exisSys) =
     in (newTemp{ temTransitions = temTransitions newTemp ++ newTransitions }, exisSys `joinSys` currSys)
 
 
-translateExp :: Map Name Text -> Map Integer (Set Val) -> [(Text, [Label], Text)] -> Exp -> TransT (Template, System)
+translateExp :: Map Name Text -> Map Integer (Set Val) -> [([Label], Label)] -> Exp -> TransT (Template, System)
 translateExp _ _ _ (ValExp v) = do 
     state <- State.get
     nilSystem $ locNameFromVal (staticMap state) v
@@ -198,13 +198,13 @@ translateExp recVars receivables inVars (AppExp e1 e2) = do
 translateExp recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     id1           <- nextVarID
     failLabels    <- translateCtt $ negateCtt g
-    succeedLabel  <- translateCtt g
+    [Label _ t]   <- translateCtt g
     locFail       <- newLoc "invarFail"
     locFinish     <- newLoc "invarDone"
-    (temp1, sys1) <- translateExp recVars receivables ((locId locFail, failLabels, Text.pack ("inv" ++ show id1)):inVars) e1
-    let temp1'    = temp1{ temLocations = Prelude.map (addInvariant succeedLabel) $ temLocations temp1 }
+    (temp1, sys1) <- translateExp recVars receivables ((failLabels, Label InvariantKind t) : inVars) e1
+    let temp1'    = temp1{ temLocations = Prelude.map (addInvariant (Label InvariantKind t)) $ temLocations temp1 }
     let failTrans = [Transition (locId loc) (locId locFail) [failLabel] | loc <- temLocations temp1, failLabel <- failLabels]
-    let temp2     = temp1'{ temTransitions = Transition (temFinal temp1') (locId locFinish) succeedLabel : (temTransitions temp1' ++ failTrans),
+    let temp2     = temp1'{ temTransitions = Transition (temFinal temp1') (locId locFinish) [Label GuardKind t] : (temTransitions temp1' ++ failTrans),
                            temLocations   = temLocations temp1' ++ [locFail, locFinish],
                            temFinal       = locId locFinish }
     id2           <- nextUniqueID
@@ -214,14 +214,7 @@ translateExp recVars receivables inVars (InvarExp g _ subst e1 e2) = do
             setUniqueID id2'
             let e2' = substitute e2 subst
             systems <- Prelude.sequence [translateExp recVars receivables inVars (substitute e2' sigma) | sigma <- Set.toList sigmas]
-            return $ Prelude.foldr (mergeSystems (locId locFail)) (temp2, sys1) systems 
-    where
-        addInvariant [Label _ t] loc =
-            let (label, labels) = Prelude.foldr extendInvar (Label InvariantKind t, []) $ locLabels loc
-            in  loc{ locLabels = label : labels }
-
-        extendInvar (Label InvariantKind t') (Label _ t, labels) = (Label InvariantKind $ t' `Text.append` " and " `Text.append` t, labels)
-        extendInvar label' (label, labels)                       = (label, label':labels)  
+            return $ Prelude.foldr (mergeSystems (locId locFail)) (temp2, sys1) systems  
 
 translateExp recVars receivables inVars (LetExp x e1 e2) = do
     (temp1, sys1) <- translateExp recVars receivables inVars e1
@@ -280,15 +273,15 @@ translateExp _ receivables inVars (ParExp e1 e2) = do
                 Nothing                 -> mzero
                 Just (sendables2, id2') -> do
                     setUniqueID id2'
-                    (temp1, sys1)    <- translateExp Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) inVars e1
-                    (temp2, sys2)    <- translateExp Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) inVars e2
+                    (temp1, sys1)    <- translateExp Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1
+                    (temp2, sys2)    <- translateExp Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2
                     (tempMain, sys3) <- nilSystem "parInit"
                     let sys4         = sys1 `joinSys` sys2 `joinSys` sys3
                     startID          <- nextUniqueID
                     stopID1          <- nextUniqueID
                     stopID2          <- nextUniqueID
-                    temp1'           <- addGuards temp1 startID stopID1
-                    temp2'           <- addGuards temp2 startID stopID2
+                    temp1'           <- addGuards temp1 startID stopID1 inVars
+                    temp2'           <- addGuards temp2 startID stopID2 inVars
                     tempMain'        <- addGuardsMain tempMain startID stopID1 stopID2
                     let varDecl      = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
                     return (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
@@ -296,16 +289,21 @@ translateExp _ receivables inVars (ParExp e1 e2) = do
     where
         varText s id kind = Text.pack $ s ++ show id ++ kind
 
-        addGuards temp startID stopID = do
+        addGuards temp startID stopID inVars = do
             initLoc        <- newLoc "init"
             let startLabel = Label SyncKind $ varText "start" startID "?"
             let endLabel   = Label SyncKind $ varText "stop" stopID "!"
-            let newTrans   = [Transition (locId initLoc) (temInit temp) [startLabel], 
-                              Transition (temFinal temp) (locId initLoc) [endLabel]]
-            return $ temp{ temInit = locId initLoc, 
+            let newTrans   = [Transition (locId initLoc) (temInit temp) [startLabel], Transition (temFinal temp) (locId initLoc) [endLabel]]
+            let temp'      = checkInvariant temp (locId initLoc) inVars
+            let temp''     = Prelude.foldr (\(_, inVar) temp -> temp{ temLocations = Prelude.map (addInvariant inVar) $ temLocations temp }) temp' inVars
+            return $ temp''{ temInit = locId initLoc, 
                            temFinal = locId initLoc, 
-                           temLocations = initLoc : temLocations temp, 
-                           temTransitions = temTransitions temp ++ newTrans }
+                           temLocations = initLoc : temLocations temp'', 
+                           temTransitions = temTransitions temp'' ++ newTrans }
+
+        checkInvariant temp to inVars = 
+            let failTrans = Prelude.concat [[Transition from to [failLabel] | failLabel <- failLabels, from <- Prelude.map locId $ temLocations temp] | (failLabels, _) <- inVars]
+            in  temp{ temTransitions = temTransitions temp ++ failTrans }
 
         addGuardsMain temp startID stopID1 stopID2 = do
             initLoc        <- newLoc "parInit"
@@ -327,6 +325,14 @@ translateExp recVars _ _ (RefExp x) | x `Map.member` recVars = do
     return (temp{ temTransitions = [Transition (temFinal temp) (recVars ! x) []] }, sys)
 
 translateExp _ _ _ _ = mzero
+
+
+addInvariant invar loc =
+    let (label, labels) = Prelude.foldr extendInvar (invar, []) $ locLabels loc
+    in  loc{ locLabels = label : labels }
+    where
+        extendInvar (Label InvariantKind t') (Label _ t, labels) = (Label InvariantKind $ t' `Text.append` " and " `Text.append` t, labels)
+        extendInvar label' (label, labels)                       = (label, label':labels) 
 
 
 locNameFromVal :: Map Val Text -> Val -> Text
