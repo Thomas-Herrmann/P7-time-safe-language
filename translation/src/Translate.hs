@@ -17,7 +17,6 @@ data TransState = TransState {
                                uniqueID  :: Integer
                              , tempID    :: Integer
                              , locID     :: Integer
-                             , gVarID    :: Integer
                              , staticMap :: Map Val Text
                              }
 
@@ -42,7 +41,7 @@ translate e clockNames inPinNames outPinNames worldName =
         clockMap     = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
         inPinMap     = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
         outPinMap    = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
-        initState    = TransState 0 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
+        initState    = TransState 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'           = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` worldSubst
 
         stateDecls :: Map Val Text -> [Declaration]
@@ -196,7 +195,6 @@ translateExp recVars receivables inVars (AppExp e1 e2) = do
         apply (ConVal OpenCon) _ = nilSystem "appOpen" >>= return . Set.singleton
 
 translateExp recVars receivables inVars (InvarExp g _ subst e1 e2) = do
-    id1           <- nextVarID
     failLabels    <- translateCtt $ negateCtt g
     [Label _ t]   <- translateCtt g
     locFail       <- newLoc "invarFail"
@@ -260,7 +258,7 @@ translateExp recVars receivables inVars (GuardExp e g) = do
     let prevInitID = temInit temp
     return (temp{ temLocations   = initLoc : temLocations temp, 
                   temTransitions = Transition (locId initLoc) prevInitID guard : temTransitions temp, 
-                  temInit        = (locId initLoc) }, sys) -- we assume that our guards do not have LOR, although syntactically possible
+                  temInit        = locId initLoc }, sys) -- we assume that our guards do not have LOR, although syntactically possible
 
 translateExp _ receivables inVars (ParExp e1 e2) = do
     id1 <- nextUniqueID
@@ -394,12 +392,6 @@ nextUniqueID :: TransT Integer
 nextUniqueID = State.get >>= 
     (\state -> State.put state{ uniqueID = uniqueID state + 1 } >> 
     return (uniqueID state))
-
-
-nextVarID :: TransT Integer
-nextVarID = State.get >>= 
-    (\state -> State.put state{ gVarID = gVarID state + 1 } >> 
-    return (gVarID state))
 
 
 setUniqueID :: Integer -> TransT ()
