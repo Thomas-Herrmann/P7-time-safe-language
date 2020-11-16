@@ -67,6 +67,7 @@ data Con = ResetCon | OpenCon deriving (Eq, Ord, Show)
 data Val = ConVal Con
          | TermVal Name [Val]
          | MatchVal MatchBody -- We ensure at least one branch by use of 'MatchBody'
+         | RecMatchVal Name MatchBody
          | ClkVal Integer     -- Integer corresponds to clock ID
          | ReceiveVal Integer -- Integer corresponds to channel ID
          | SendVal Integer    --
@@ -81,35 +82,35 @@ class Substitutable a where
     substitute :: a -> Subst -> a
 
 instance Substitutable Exp where
-    fv (RefExp x)               = Set.singleton x
-    fv (AppExp e1 e2)           = fv e1 `Set.union` fv e2
-    fv (FixExp e)               = fv e   
-    fv (ValExp (MatchVal body)) = fv body
-    fv (InvarExp _ _ _ e1 e2)   = fv e1 `Set.union` fv e2
-    fv (LetExp x e1 e2)         = (fv e1 `Set.union` fv e2) `Set.difference` Set.singleton x
-    fv (SyncExp body)           = fv body
-    fv (GuardExp e _)           = fv e
-    fv (ParExp e1 e2)           = fv e1 `Set.union` fv e2
-    fv _                        = Set.empty
+    fv (RefExp x)                    = Set.singleton x
+    fv (AppExp e1 e2)                = fv e1 `Set.union` fv e2
+    fv (FixExp e)                    = fv e   
+    fv (ValExp (MatchVal body))      = fv body
+    fv (ValExp (RecMatchVal x body)) = fv body `Set.difference` Set.singleton x
+    fv (InvarExp _ _ _ e1 e2)        = fv e1 `Set.union` fv e2
+    fv (LetExp x e1 e2)              = (fv e1 `Set.union` fv e2) `Set.difference` Set.singleton x
+    fv (SyncExp body)                = fv body
+    fv (GuardExp e _)                = fv e
+    fv (ParExp e1 e2)                = fv e1 `Set.union` fv e2
+    fv _                             = Set.empty
 
     substitute (RefExp x) subst | x `Map.member` subst = ValExp $ subst ! x
                                 | otherwise            = RefExp x
 
-    substitute (AppExp e1 e2) subst               = AppExp (substitute e1 subst) (substitute e2 subst)
-    substitute (FixExp e) subst                   = FixExp $ substitute e subst
-    substitute (ValExp (MatchVal body)) subst     = ValExp $ MatchVal (substitute body subst)
-    substitute (InvarExp g xs subst e1 e2) subst' = InvarExp (substitute g subst') xs subst'' (substitute e1 subst') (substitute e2 filtered)
+    substitute (AppExp e1 e2) subst                = AppExp (substitute e1 subst) (substitute e2 subst)
+    substitute (FixExp e) subst                    = FixExp $ substitute e subst
+    substitute (ValExp (MatchVal body)) subst      = ValExp $ MatchVal (substitute body subst)
+    substitute (ValExp (RecMatchVal x body)) subst = ValExp $ RecMatchVal x (substitute body $ Map.delete x subst)
+    substitute (InvarExp g xs subst e1 e2) subst'  = InvarExp (substitute g subst') xs subst'' (substitute e1 subst') (substitute e2 filtered)
         where
-            pred k _ = not (k `Prelude.elem` xs)
+            pred k _ = k `Prelude.notElem` xs
             filtered = Map.filterWithKey pred subst'
-            subst''  = subst `Map.union` (Map.map (\v -> TermVal "Just" [v]) filtered)
+            subst''  = subst `Map.union` Map.map (\v -> TermVal "Just" [v]) filtered
 
-    substitute (LetExp x e1 e2) subst | x `Map.member` subst = LetExp x (substitute e1 subst) e2
-                                      | otherwise            = LetExp x (substitute e1 subst) (substitute e2 subst)
-
-    substitute (SyncExp body) subst = SyncExp $ substitute body subst
-    substitute (GuardExp e g) subst = GuardExp (substitute e subst) (substitute g subst)
-    substitute (ParExp e1 e2) subst = ParExp (substitute e1 subst) (substitute e2 subst)
+    substitute (LetExp x e1 e2) subst = LetExp x (substitute e1 subst) (substitute e2 $ Map.delete x subst)
+    substitute (SyncExp body) subst   = SyncExp $ substitute body subst
+    substitute (GuardExp e g) subst   = GuardExp (substitute e subst) (substitute g subst)
+    substitute (ParExp e1 e2) subst   = ParExp (substitute e1 subst) (substitute e2 subst)
 
     substitute e _ = e
 
@@ -147,7 +148,7 @@ instance Substitutable Sync where
     fv (SendSync (Right _) y _) = Set.singleton y
     fv (GetSync (Left x) _)     = Set.singleton x
     fv (SetSync (Left x) _)     = Set.singleton x
-    fv q                        = Set.empty
+    fv _                        = Set.empty
 
     substitute (ReceiveSync (Left x) y) subst      | x `Map.member` subst = ReceiveSync (Right (subst ! x)) y
     substitute (SendSync (Left x) y Nothing) subst | x `Map.member` subst && y `Map.member` subst = SendSync (Right (subst ! x)) y (Just (subst ! y))
@@ -184,5 +185,5 @@ instance Introducable Pat where
 
 instance Introducable Sync where
     iv (ReceiveSync _ y) = Set.singleton y
-    iv q                 = Set.empty
+    iv _                 = Set.empty
 

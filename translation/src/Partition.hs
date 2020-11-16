@@ -24,17 +24,17 @@ partition receivables e n =
 
 
 next :: ParT Integer
-next = State.get >>= (\n -> State.put (n + 1) >> (return n))
+next = State.get >>= (\n -> State.put (n + 1) >> return n)
 
 
 partitionExp :: Map Integer (Set Val) -> Exp -> ParT (Set Val)
 partitionExp _ (ValExp v) = return $ Set.singleton v
 partitionExp _ (RefExp _) = return Set.empty
-partitionExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) e)))) = return Set.empty
+partitionExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = return Set.empty
 partitionExp receivables (GuardExp e _) = partitionExp receivables e
 partitionExp receivables (LetExp x e1 e2) = partitionExp receivables e1 >>= foldrM fun Set.empty
     where
-        fun v set = ((partitionExp receivables) . (substitute e2)) (Map.singleton x v) >>= return . (Set.union set)
+        fun v set = (partitionExp receivables . substitute e2) (Map.singleton x v) >>= return . (Set.union set)
 
 partitionExp receivables (SyncExp body) = partitionBody body
     where
@@ -160,13 +160,13 @@ snapshotsAux receivables (AppExp e1 e2) = do
         applySnapshots :: [Val] -> [Val] -> ParT (Map Name (Set Val))
         applySnapshots vs1 vs2 = do
             let es = Prelude.foldr Set.union Set.empty [getExps v1 v2 | v1 <- vs1, v2 <- vs2]
-            maps   <- Prelude.sequence $ Prelude.map (snapshotsAux receivables) $ Set.toList es
+            maps   <- Prelude.mapM (snapshotsAux receivables) $ Set.toList es
             return $ Prelude.foldr (Map.unionWith Set.union) Map.empty maps
 
 
-snapshotsAux _ (FixExp (ValExp (MatchVal body@(SingleMatch (RefPat _) _)))) = return Map.empty
+snapshotsAux _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = return Map.empty
 
-snapshotsAux receivables (InvarExp _ xs subst e1 e2) = do
+snapshotsAux receivables (InvarExp _ _ subst e1 e2) = do
     map1    <- snapshotsAux receivables e1
     set1    <- snapshotsExp receivables subst e1
     mapList <- Prelude.sequence [snapshotsAux receivables (substitute e2 sigma) | sigma <- Set.toList set1]
@@ -201,7 +201,7 @@ snapshotsAux receivables (GuardExp e _) = snapshotsAux receivables e
 snapshotsAux receivables (ParExp e1 e2) = do
     map1 <- snapshotsAux receivables e1
     map2 <- snapshotsAux receivables e2
-    return $ (Map.unionWith Set.union) map1 map2
+    return $ Map.unionWith Set.union map1 map2
 
 snapshotsAux _ _ = mzero
 
@@ -222,7 +222,7 @@ sendsExp receivables (AppExp e1 e2) = do
     vs1  <- partitionExp receivables e1
     vs2  <- partitionExp receivables e2
     map3 <- applySends (Set.toList vs1) (Set.toList vs2)
-    return $ (Map.unionWith Set.union) ((Map.unionWith Set.union) map1 map2) map3
+    return $ Map.unionWith Set.union (Map.unionWith Set.union map1 map2) map3
     where
         getExps (MatchVal body) v2 = matchBody body v2
         getExps _ _                = Set.empty
@@ -239,13 +239,13 @@ sendsExp receivables (AppExp e1 e2) = do
 
         applySends vs1 vs2 = do
             let es = Prelude.foldr Set.union Set.empty [getExps v1 v2 | v1 <- vs1, v2 <- vs2]
-            maps   <- Prelude.sequence $ Prelude.map (sendsExp receivables) $ Set.toList es
+            maps   <- Prelude.mapM (sendsExp receivables) $ Set.toList es
             return $ Prelude.foldr (Map.unionWith Set.union) Map.empty maps
 
     
-sendsExp _ (FixExp (ValExp (MatchVal body@(SingleMatch (RefPat _) _)))) = return Map.empty
+sendsExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = return Map.empty
 
-sendsExp receivables (InvarExp _ xs subst e1 e2) = do 
+sendsExp receivables (InvarExp _ _ subst e1 e2) = do 
     map1    <- sendsExp receivables e1
     sigmas  <- snapshotsExp receivables subst e1
     mapList <- Prelude.sequence [sendsExp receivables (substitute e2 sigma) | sigma <- Set.toList sigmas]
@@ -267,7 +267,7 @@ sendsExp receivables (SyncExp body) = sendsBody body -- TODO: multiple passes!
             return $ Map.unionWith Set.union map1 map2
 
         sendsSync :: Sync -> Exp -> ParT (Map Integer (Set Val))
-        sendsSync (SendSync (Right (SendVal id)) x (Just v)) e = do
+        sendsSync (SendSync (Right (SendVal id)) _ (Just v)) e = do
             map1 <- sendsExp receivables e
             return $ Map.unionWith Set.union (Map.singleton id $ Set.singleton v) map1
 
@@ -287,6 +287,6 @@ sendsExp receivables (GuardExp e _) = sendsExp receivables e
 sendsExp receivables (ParExp e1 e2) = do 
     map1 <- sendsExp receivables e1 
     map2 <- sendsExp receivables e2
-    return $ (Map.unionWith Set.union) map1 map2
+    return $ Map.unionWith Set.union map1 map2
 
 sendsExp _ _ = mzero
