@@ -9,6 +9,7 @@ import Data.List as List
 import Control.Monad.Trans.Maybe
 import Control.Monad.State as State
 import Data.Text as Text
+import Data.Functor((<&>))
 import Ast
 import Partition
 import Uppaal
@@ -130,10 +131,21 @@ mergeSystems from (currTemp, currSys) (exisTemp, exisSys) =
     in (newTemp{ temTransitions = temTransitions newTemp ++ newTransitions }, exisSys `joinSys` currSys)
 
 
-translateExp :: Map Name Text -> Map Integer (Set Val) -> [([Label], Label)] -> Exp -> TransT (Template, System)
+translateExp :: Map Name (Text, Text) -> Map Integer (Set Val) -> [([Label], Label)] -> Exp -> TransT (Template, System)
 translateExp _ _ _ (ValExp v) = do 
     state <- State.get
     nilSystem $ locNameFromVal (staticMap state) v
+
+translateExp recVars _ _ (RefExp x) | x `Map.member` recVars = do
+    (temp, sys) <- nilSystem $ "recRef(" `Text.append` Text.pack x `Text.append` ")"
+    locFinal    <- newLoc $ "recRefFinish(" `Text.append` Text.pack x `Text.append` ")"
+    let (recInit, recFinish) = recVars ! x
+    let recTrans = [Transition (temFinal temp) recInit [], 
+                    Transition recFinish (locId locFinal) [], 
+                    Transition (locId locFinal) recInit []]
+    return (temp{ temLocations   = locFinal : temLocations temp,
+                  temFinal       = locId locFinal,
+                  temTransitions = temTransitions temp ++ recTrans }, sys)
 
 -- fix has no effect unless applied, as we force it to be wrapped around abstractions!
 translateExp _ _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) (ValExp (MatchVal _)))))) = nilSystem "fixAbs"
@@ -151,7 +163,7 @@ translateExp recVars receivables inVars (AppExp e1 e2) = do
                 Nothing          -> mzero
                 Just (vs2, id2') -> do
                     setUniqueID id2'
-                    systemSets  <- Prelude.sequence [apply v1 v2 | v1 <- Set.toList vs1, v2 <- Set.toList vs2]
+                    systemSets  <- Prelude.sequence [apply v1 v2 (temFinal temp2) | v1 <- Set.toList vs1, v2 <- Set.toList vs2]
                     let systems = Prelude.foldr Set.union Set.empty systemSets
                     finalLoc    <- newLoc "appDone"
                     let temp3   = (temp1 `joinTemp` temp2){ temFinal = locId finalLoc }
@@ -172,18 +184,27 @@ translateExp recVars receivables inVars (AppExp e1 e2) = do
                     set'    <- matchBody rem v
                     return $ set `Set.union` set'
 
-        apply :: Val -> Val -> TransT (Set (Template, System)) -- TODO: add RecMatchVal for fix (also in partition)!
-        apply (MatchVal body) v2 = do
+        apply :: Val -> Val -> Text -> TransT (Set (Template, System)) -- TODO: add RecMatchVal for fix (also in partition)!
+        apply (MatchVal body) v2 _ = do
             es      <- matchBody body v2 
             systems <- Prelude.mapM (translateExp recVars receivables inVars) (Set.toList es)
             return $ Set.fromList systems
 
-        apply v1@(TermVal _ _) _ = do 
+        apply (RecMatchVal x body) v2 recInit = do
+            es           <- matchBody body v2
+            finalLoc     <- newLoc "branchFinish"
+            let recVars' = Map.insert x (recInit, locId finalLoc) recVars
+            systems      <- Prelude.mapM (translateExp recVars' receivables inVars) (Set.toList es)
+            let addRecLoc (temp, sys) = (temp{ temFinal = locId finalLoc, temLocations = finalLoc : temLocations temp }, sys)
+            let systems' = Prelude.map addRecLoc systems
+            return $ Set.fromList systems'
+
+        apply v1@(TermVal _ _) _ _ = do 
             state  <- State.get
             system <- nilSystem $ "app" `Text.append` locNameFromVal (staticMap state) v1
-            return . Set.singleton $ system
+            return $ Set.singleton system
 
-        apply (ConVal ResetCon) v2 = do
+        apply (ConVal ResetCon) v2 _ = do
             (temp, sys) <- nilSystem "appReset"
             finalLoc    <- newLoc "appDone"
             t           <- translateStatic v2
@@ -192,7 +213,7 @@ translateExp recVars receivables inVars (AppExp e1 e2) = do
                                           temTransitions = Transition (temFinal temp) (locId finalLoc) [label] : temTransitions temp,
                                           temFinal       = locId finalLoc }, sys)
 
-        apply (ConVal OpenCon) _ = nilSystem "appOpen" >>= return . Set.singleton
+        apply (ConVal OpenCon) _ _ = nilSystem "appOpen" <&> Set.singleton
 
 translateExp recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     failLabels    <- translateCtt $ negateCtt g
@@ -261,29 +282,24 @@ translateExp recVars receivables inVars (GuardExp e g) = do
                   temInit        = locId initLoc }, sys) -- we assume that our guards do not have LOR, although syntactically possible
 
 translateExp _ receivables inVars (ParExp e1 e2) = do
-    id1 <- nextUniqueID
-    case sends receivables e1 id1 of
-        Nothing                 -> mzero
-        Just (sendables1, id1') -> do
-            setUniqueID id1'
-            id2 <- nextUniqueID
-            case sends receivables e2 id2 of
-                Nothing                 -> mzero
-                Just (sendables2, id2') -> do
-                    setUniqueID id2'
-                    (temp1, sys1)    <- translateExp Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1
-                    (temp2, sys2)    <- translateExp Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2
-                    (tempMain, sys3) <- nilSystem "parInit"
-                    let sys4         = sys1 `joinSys` sys2 `joinSys` sys3
-                    startID          <- nextUniqueID
-                    stopID1          <- nextUniqueID
-                    stopID2          <- nextUniqueID
-                    temp1'           <- addGuards temp1 startID stopID1 inVars
-                    temp2'           <- addGuards temp2 startID stopID2 inVars
-                    tempMain'        <- addGuardsMain tempMain startID stopID1 stopID2
-                    let varDecl      = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
-                    return (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
-                                             sysDecls = varDecl : sysDecls sys4 })
+    id <- nextUniqueID
+    case multiPassSends e1 e2 2 id of
+        Nothing                            -> mzero
+        Just (sendables1, sendables2, id') -> do
+            setUniqueID id'
+            (temp1, sys1)    <- translateExp Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1
+            (temp2, sys2)    <- translateExp Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2
+            (tempMain, sys3) <- nilSystem "parInit"
+            let sys4         = sys1 `joinSys` sys2 `joinSys` sys3
+            startID          <- nextUniqueID
+            stopID1          <- nextUniqueID
+            stopID2          <- nextUniqueID
+            temp1'           <- addGuards temp1 startID stopID1 inVars
+            temp2'           <- addGuards temp2 startID stopID2 inVars
+            tempMain'        <- addGuardsMain tempMain startID stopID1 stopID2
+            let varDecl      = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
+            return (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
+                                     sysDecls = varDecl : sysDecls sys4 })
     where
         varText s id kind = Text.pack $ s ++ show id ++ kind
 
@@ -317,10 +333,6 @@ translateExp _ receivables inVars (ParExp e1 e2) = do
                            temFinal       = locId stopLoc2,
                            temLocations   = temLocations temp ++ [initLoc, stopLoc1, stopLoc2],
                            temTransitions = temTransitions temp ++ newTrans }
-
-translateExp recVars _ _ (RefExp x) | x `Map.member` recVars = do
-    (temp, sys) <- nilSystem $ "recRef(" `Text.append` Text.pack x `Text.append` ")"
-    return (temp{ temTransitions = [Transition (temFinal temp) (recVars ! x) []] }, sys)
 
 translateExp _ _ _ _ = mzero
 

@@ -2,6 +2,7 @@ module Partition
     ( Partition.partition
     , match
     , sends
+    , multiPassSends
     , snapshots
     ) where
 
@@ -9,6 +10,7 @@ import Data.Set as Set
 import Data.Map as Map
 import Control.Monad.Trans.Maybe
 import Control.Monad.State as State
+import Data.Functor((<&>))
 import Data.Foldable
 import Ast
 
@@ -34,7 +36,7 @@ partitionExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = return 
 partitionExp receivables (GuardExp e _) = partitionExp receivables e
 partitionExp receivables (LetExp x e1 e2) = partitionExp receivables e1 >>= foldrM fun Set.empty
     where
-        fun v set = (partitionExp receivables . substitute e2) (Map.singleton x v) >>= return . (Set.union set)
+        fun v set = (partitionExp receivables . substitute e2) (Map.singleton x v) <&> Set.union set
 
 partitionExp receivables (SyncExp body) = partitionBody body
     where
@@ -71,14 +73,16 @@ partitionExp receivables (InvarExp _ _ subst e1 e2) = do
 
 partitionExp receivables (AppExp e1 e2) = partitionExp receivables e1 >>= foldrM unionApply Set.empty
     where
-        unionApply v set       = apply v e2 >>= return . (Set.union set) 
-        unionMatch body v set  = matchBody body v >>= return . (Set.union set)
+        unionApply v set       = apply v <&> Set.union set
+        unionMatch body v set  = matchBody body v <&> Set.union set
+        unionPartition body    = partitionExp receivables e2 >>= foldrM (unionMatch body) Set.empty
 
-        apply :: Val -> Exp -> ParT (Set Val)
-        apply (MatchVal body) e2   = partitionExp receivables e2 >>= foldrM (unionMatch body) Set.empty
-        apply (TermVal x vs) e2    = partitionExp receivables e2 >>= (\set -> return (Set.fromList [TermVal x (vs ++ [v]) | v <- Set.toList set]))
-        apply (ConVal ResetCon) e2 = partitionExp receivables e2
-        apply (ConVal OpenCon) e2  = do 
+        apply :: Val -> ParT (Set Val)
+        apply (MatchVal body)      = unionPartition body
+        apply (RecMatchVal x body) = unionPartition $ substitute body (Map.singleton x (MatchVal body)) -- Perform recursion once to hopefully find all value patterns
+        apply (TermVal x vs)       = partitionExp receivables e2 >>= (\set -> return (Set.fromList [TermVal x (vs ++ [v]) | v <- Set.toList set]))
+        apply (ConVal ResetCon)    = partitionExp receivables e2
+        apply (ConVal OpenCon)     = do 
             id  <- next
             set <- partitionExp receivables e2
             return $ Set.map (\v -> TermVal "Triple" [SendVal id, ReceiveVal id, v]) set
@@ -144,8 +148,9 @@ snapshotsAux receivables (AppExp e1 e2) = do
     map3 <- applySnapshots (Set.toList vs1) (Set.toList vs2)
     return $ Map.unionWith Set.union (Map.unionWith Set.union map1 map2) map3
     where
-        getExps (MatchVal body) v2 = matchBody body v2
-        getExps _ _                = Set.empty
+        getExps (MatchVal body) v2      = matchBody body v2
+        getExps (RecMatchVal x body) v2 = matchBody (substitute body (Map.singleton x (MatchVal body))) v2
+        getExps _ _                     = Set.empty
 
         matchBody (SingleMatch p e) v =
             case match p v of
@@ -206,7 +211,21 @@ snapshotsAux receivables (ParExp e1 e2) = do
 snapshotsAux _ _ = mzero
 
 
-sends :: Map Integer (Set Val) -> Exp -> Integer -> Maybe (Map Integer (Set Val), Integer) -- TODO: add receivables?
+multiPassSends :: Exp -> Exp -> Integer -> Integer -> Maybe (Map Integer (Set Val), Map Integer (Set Val), Integer)
+multiPassSends e1 e2 passes n =
+    case runState (runMaybeT (multiPassAux e1 e2 Map.empty Map.empty passes)) n of
+        (Nothing, _)           -> Nothing
+        (Just (map1, map2), s) -> Just (map1, map2, s)
+    where
+        multiPassAux :: Exp -> Exp -> Map Integer (Set Val) -> Map Integer (Set Val) -> Integer -> ParT (Map Integer (Set Val), Map Integer (Set Val))
+        multiPassAux _ _ receivables1 receivables2 n | n <= 1    = return (receivables2, receivables1)
+                                                     | otherwise = do
+            map1 <- sendsExp receivables1 e1
+            map2 <- sendsExp receivables2 e2
+            multiPassAux e1 e2 map2 map1 $ n - 1
+
+
+sends :: Map Integer (Set Val) -> Exp -> Integer -> Maybe (Map Integer (Set Val), Integer)
 sends receivables e n = 
     case runState (runMaybeT (sendsExp receivables e)) n of
         (Nothing, _)  -> Nothing
@@ -224,8 +243,9 @@ sendsExp receivables (AppExp e1 e2) = do
     map3 <- applySends (Set.toList vs1) (Set.toList vs2)
     return $ Map.unionWith Set.union (Map.unionWith Set.union map1 map2) map3
     where
-        getExps (MatchVal body) v2 = matchBody body v2
-        getExps _ _                = Set.empty
+        getExps (MatchVal body) v2      = matchBody body v2
+        getExps (RecMatchVal x body) v2 = matchBody (substitute body (Map.singleton x (MatchVal body))) v2
+        getExps _ _                     = Set.empty
 
         matchBody (SingleMatch p e) v =
             case match p v of
@@ -257,7 +277,7 @@ sendsExp receivables (LetExp x e1 e2) = do
     mapList <- Prelude.sequence [sendsExp receivables (substitute e2 (Map.singleton x v)) | v <- Set.toList vs1]
     return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
 
-sendsExp receivables (SyncExp body) = sendsBody body -- TODO: multiple passes!
+sendsExp receivables (SyncExp body) = sendsBody body
     where
         sendsBody :: SyncBody -> ParT (Map Integer (Set Val))
         sendsBody (SingleSync q e)    = sendsSync q e 

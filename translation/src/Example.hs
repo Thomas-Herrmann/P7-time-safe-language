@@ -1,4 +1,4 @@
-module Example where
+module Example (mainFun) where
 
 import Ast
 import qualified Data.Map as Map

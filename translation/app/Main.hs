@@ -9,6 +9,7 @@ import Ast
 import Partition
 import Translate
 import Uppaal
+import Example
 
 --ex = AppExp 
 --        (ValExp (MatchVal (MultiMatch (RefPat "y") (AppExp (ValExp (TermVal "Single" [])) (RefExp "y")) (SingleMatch (RefPat "x") (RefExp "x"))))) 
@@ -65,6 +66,6 @@ testE2'' = InvarExp (ClockLeqCtt (Left "clk1") 25) [] Map.empty testE2 $ (ValExp
 
 main :: IO ()
 main =
-   case translate testE2'' ["clk1"] [] [] "w" of
-      Nothing  -> print "failure"
+   case translate testE2' ["clk1"] [] [] "w" of
+      Nothing  -> putStrLn "failure"
       Just sys -> Text.XML.writeFile def "test.xml" $ systemToXML sys
