@@ -32,7 +32,7 @@ next = State.get >>= (\n -> State.put (n + 1) >> return n)
 partitionExp :: Map Integer (Set Val) -> Exp -> ParT (Set Val)
 partitionExp _ (ValExp v) = return $ Set.singleton v
 partitionExp _ (RefExp _) = return Set.empty
-partitionExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = return Set.empty
+partitionExp _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat x) (ValExp (MatchVal body)))))) = return $ Set.singleton (RecMatchVal x body)
 partitionExp receivables (GuardExp e _) = partitionExp receivables e
 partitionExp receivables (LetExp x e1 e2) = partitionExp receivables e1 >>= foldrM fun Set.empty
     where

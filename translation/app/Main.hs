@@ -50,14 +50,10 @@ testE2 = (AppExp
                         (ValExp (ConVal OpenCon)) 
                         (RefExp "w")))
 
---testNew = FixExp (ValExp (MatchVal (SingleMatch (RefPat "f")
---                ())))
-
-testE2'' = InvarExp (ClockLeqCtt (Left "clk1") 25) [] Map.empty testE2 $ (ValExp (ConVal ResetCon))
+testE2'' = InvarExp (ClockLeqCtt (Left "clk1") 25) [] Map.empty testE2 (ValExp (ConVal ResetCon))
 
 main :: IO ()
-main = do
-   print $ show Example.mainFun
-   case translate Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName of
+main =
+   case translate Example.testFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName of
       Nothing  -> putStrLn "failure"
-      Just sys -> Text.XML.writeFile def "test.xml" $ systemToXML sys
+      Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML sys
