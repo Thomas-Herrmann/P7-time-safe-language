@@ -1,4 +1,10 @@
-module Example (mainFun) where
+module Example 
+    ( mainFun
+    , clockNames
+    , inPinNames
+    , outPinNames
+    , worldName
+    ) where
 
 import Ast
 import qualified Data.Map as Map
@@ -29,6 +35,11 @@ callLoop args = AppExp (RefExp "loop") (constructTuple "cfArgs" args)
 
 presetup e = LetExp "tt" (ValExp $ TermVal "true" []) $
              LetExp "ff" (ValExp $ TermVal "false" []) e 
+
+clockNames = ["clkX1", "clkY1", "clkX2", "clkY2"]
+inPinNames = ["pSen1", "pSen2"]
+outPinNames = ["pLig1", "pLig2"]
+worldName = "world"
 
 mainFun = presetup $ LetExp "conFun" conFun $
     AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "triple" [RefPat "wgSen1", RefPat "wgRec1", RefPat "w1"]) (
