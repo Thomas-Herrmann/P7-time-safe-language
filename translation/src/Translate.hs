@@ -137,8 +137,8 @@ translateExp _ _ _ (ValExp v) = do
     nilSystem $ locNameFromVal (staticMap state) v
 
 translateExp recVars _ _ (RefExp x) | x `Map.member` recVars = do
-    (temp, sys) <- nilSystem $ "recRef(" `Text.append` Text.pack x `Text.append` ")"
-    locFinal    <- newLoc $ "recRefFinish(" `Text.append` Text.pack x `Text.append` ")"
+    (temp, sys) <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
+    locFinal    <- newLoc $ "recRefFinish_" `Text.append` Text.pack x `Text.append` "_"
     let (recInit, recFinish) = recVars ! x
     let recTrans = [Transition (temFinal temp) recInit [], 
                     Transition recFinish (locId locFinal) [], 
@@ -349,7 +349,7 @@ locNameFromVal :: Map Val Text -> Val -> Text
 locNameFromVal valMap v | v `Map.member` valMap = (valMap ! v) `Text.append` "_"
 locNameFromVal _ (ConVal ResetCon)              = "resetCon"
 locNameFromVal _ (ConVal OpenCon)               = "openCon"
-locNameFromVal valMap (TermVal name vs)         = Text.pack $ name ++ "(" ++ List.intercalate ", " (Prelude.map (Text.unpack . locNameFromVal valMap) vs) ++ ")"
+locNameFromVal valMap (TermVal name vs)         = Text.pack $ name ++ "_" ++ List.intercalate "_" (Prelude.map (Text.unpack . locNameFromVal valMap) vs) ++ "_"
 locNameFromVal _ (MatchVal _)                   = "matchAbs"
 locNameFromVal _ WorldVal                       = "world"
 

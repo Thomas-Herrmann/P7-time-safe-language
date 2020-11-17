@@ -50,22 +50,14 @@ testE2 = (AppExp
                         (ValExp (ConVal OpenCon)) 
                         (RefExp "w")))
 
-testE2' = (AppExp 
-                (ValExp (MatchVal (SingleMatch 
-                        (TermPat "Triple" [RefPat "ch", RefPat "ch'", RefPat "w'"])
-                        (FixExp (ValExp (MatchVal (SingleMatch (RefPat "f") 
-                                (AppExp ((ParExp 
-                                (SyncExp (SingleSync (ReceiveSync (Left "ch'") "res") (ValExp (ConVal ResetCon)))) 
-                                (SyncExp (SingleSync (SendSync (Left "ch") "clk1" Nothing) (ValExp (ConVal ResetCon))))))
-                                (RefExp "f"))))))))) 
-                (AppExp 
-                        (ValExp (ConVal OpenCon)) 
-                        (RefExp "w")))
+--testNew = FixExp (ValExp (MatchVal (SingleMatch (RefPat "f")
+--                ())))
 
 testE2'' = InvarExp (ClockLeqCtt (Left "clk1") 25) [] Map.empty testE2 $ (ValExp (ConVal ResetCon))
 
 main :: IO ()
-main =
-   case translate testE2' ["clk1"] [] [] "w" of
+main = do
+   print $ show Example.mainFun
+   case translate Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName of
       Nothing  -> putStrLn "failure"
       Just sys -> Text.XML.writeFile def "test.xml" $ systemToXML sys
