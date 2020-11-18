@@ -63,8 +63,8 @@ mainFun = presetup $ LetExp "conFun" conFun $
             AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "Triple" [RefPat "rSen1", RefPat "rRec1", RefPat "w3"]) (
                 AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "Triple" [RefPat "rSen2", RefPat "rRec2", RefPat "w4"]) (
                     ParExp 
-                        (AppExp (RefExp "conFun") (constructTuple "cfArgs" (map RefExp ["clkX1", "clkY1", "pSen1", "pLig1", "wgSen1" "wgRec2", "rSen1", "rRec2"] ++ [ValExp tcR1, ValExp tcFalse])))
-                        (AppExp (RefExp "conFun") (constructTuple "cfArgs" (map RefExp ["clkX2", "clkY2", "pSen2", "pLig2", "wgSen2" "wgRec1", "rSen2", "rRec1"] ++ [ValExp tcR1, ValExp tcFalse])))
+                        (AppExp (RefExp "conFun") (constructTuple "cfArgs" (map RefExp ["clkX1", "clkY1", "pSen1", "pLig1", "wgSen1", "wgRec2", "rSen1", "rRec2"] ++ [ValExp tcR1, ValExp tcFalse])))
+                        (AppExp (RefExp "conFun") (constructTuple "cfArgs" (map RefExp ["clkX2", "clkY2", "pSen2", "pLig2", "wgSen2", "wgRec1", "rSen2", "rRec1"] ++ [ValExp tcR1, ValExp tcFalse])))
                 )) (AppExp (ValExp (ConVal OpenCon)) (RefExp "world"))
             )) (AppExp (ValExp (ConVal OpenCon)) (RefExp "world"))
         )) (AppExp (ValExp (ConVal OpenCon)) (RefExp "w1"))
