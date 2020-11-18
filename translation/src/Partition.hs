@@ -104,8 +104,8 @@ partitionExp _ _ = mzero
 
 
 match :: Pat -> Val -> Maybe Subst
-match (RefPat x) v                                           = Just $ Map.singleton x v
-match (TermPat name1 ps) (TermVal name2 vs) | name1 == name2 = Prelude.foldr accumulator (Just Map.empty) $ Prelude.zip ps vs
+match (RefPat x) v                  = Just $ Map.singleton x v
+match (TermPat _ ps) (TermVal _ vs) = Prelude.foldr accumulator (Just Map.empty) $ Prelude.zip ps vs
     where
         accumulator _ Nothing           = Nothing
         accumulator (p, v) (Just sigma) =

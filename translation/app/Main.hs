@@ -52,8 +52,35 @@ testE2 = (AppExp
 
 testE2'' = InvarExp (ClockLeqCtt (Left "clk1") 25) [] Map.empty testE2 (ValExp (ConVal ResetCon))
 
+
+number n | n <= 0    = TermVal "Null" []
+         | otherwise = TermVal "Succ" [number $ n - 1]
+
+testNew = AppExp
+                (FixExp (ValExp (MatchVal (SingleMatch (RefPat "plus") 
+                        (ValExp (MatchVal (MultiMatch (TermPat "Pair" [TermPat "Succ" [RefPat "one"], RefPat "two"]) 
+                                 (AppExp 
+                                                (RefExp "plus") 
+                                                (AppExp 
+                                                        (AppExp (ValExp (TermVal "Pair" [])) (RefExp "one")) 
+                                                        (AppExp (ValExp (TermVal "Succ" [])) (RefExp "two"))))
+                                (SingleMatch (TermPat "Pair" [RefPat "one", RefPat "two"])
+                                        (RefExp "two")))))))))
+                (ValExp (TermVal "Pair" [number 5, number 5]))
+
+
+testNew' = AppExp
+                (FixExp (ValExp (MatchVal (SingleMatch (RefPat "swap") 
+                        (ValExp (MatchVal (MultiMatch (RefPat "one")
+                                (AppExp (RefExp "swap") (RefExp "one"))
+                                (SingleMatch (RefPat "two")
+                                        (ValExp (TermVal "Green" []))))))))))
+                (ValExp (TermVal "Blue" []))
+
+
 main :: IO ()
-main =
-   case translate Example.testFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName of
+main = do
+   maybe <- translate testNew Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
+   case maybe of
       Nothing  -> putStrLn "failure"
       Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML sys
