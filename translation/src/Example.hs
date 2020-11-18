@@ -21,8 +21,8 @@ tcTruePat = TermPat "true" []
 tcFalsePat = TermPat "true" []
 
 constructTuple :: Name -> [Exp] -> Exp
-constructTuple name [] = RefExp name
-constructTuple name (x:xs) = constructTuple' (AppExp (RefExp name) x) xs
+constructTuple name [] = ValExp $ TermVal name []
+constructTuple name (x:xs) = constructTuple' (AppExp (ValExp $ TermVal name []) x) xs
     where
         constructTuple' :: Exp -> [Exp] -> Exp
         constructTuple' c [] = c
@@ -61,7 +61,7 @@ mainFun = presetup $ LetExp "conFun" conFun $
     AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "Triple" [RefPat "wgSen1", RefPat "wgRec1", RefPat "w1"]) (
         AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "Triple" [RefPat "wgSen2", RefPat "wgRec2", RefPat "w2"]) (
             AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "Triple" [RefPat "rSen1", RefPat "rRec1", RefPat "w3"]) (
-                AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "Triple" [RefPat "rSen2", RefPat "wgRec2", RefPat "w4"]) (
+                AppExp (ValExp $ MatchVal $ SingleMatch (TermPat "Triple" [RefPat "rSen2", RefPat "rRec2", RefPat "w4"]) (
                     ParExp 
                         (AppExp (RefExp "conFun") (constructTuple "cfArgs" (map RefExp ["clkX1", "clkY1", "pSen1", "wgRec2", "rSen1", "rRec2"] ++ [ValExp tcR1, ValExp tcFalse])))
                         (AppExp (RefExp "conFun") (constructTuple "cfArgs" (map RefExp ["clkX2", "clkY2", "pSen2", "wgRec1", "rSen2", "rRec1"] ++ [ValExp tcR1, ValExp tcFalse])))
@@ -73,14 +73,14 @@ mainFun = presetup $ LetExp "conFun" conFun $
 conFun = FixExp $ ValExp $ MatchVal $ 
     SingleMatch (RefPat "loop") (ValExp $ MatchVal $ SingleMatch 
         (TermPat "cfArgs" (map RefPat ["clkX", "clkY", "pSen", "pLig", "wgSen", "wgRec", "rSen", "rRec", "state", "ow"])) 
-        (ValExp $ MatchVal $ MultiMatch (TermPat "R1" []) bodyR1 (
+        (AppExp (ValExp $ MatchVal $ MultiMatch (TermPat "R1" []) bodyR1 (
          MultiMatch (TermPat "R2" []) bodyR2 (
          MultiMatch (TermPat "G1" []) bodyG1 (
-         SingleMatch (TermPat "G2" []) bodyG2)))))
+         SingleMatch (TermPat "G2" []) bodyG2)))) (RefExp "state")))
 
 
 bodyR1 = LetExp "pLig" (SyncExp $ SingleSync (SetSync (Left "pLig") False) (RefExp "pLig")) $ 
-    patLetExp (TermPat "quad" [RefPat "rSen", RefPat "pSen", RefPat "state", RefPat "ow"]) 
+    patLetExp (TermPat "quad" [RefPat "rSen'", RefPat "pSen'", RefPat "state'", RefPat "ow'"]) 
         (AppExp (ValExp $ MatchVal $ 
             MultiMatch tcTruePat (constructTuple "quad" 
                 [ SyncExp $ SingleSync (SendSync (Left "rSen") "tt" Nothing) (RefExp "rSen")

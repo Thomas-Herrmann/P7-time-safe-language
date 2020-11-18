@@ -80,7 +80,7 @@ testNew' = AppExp
 
 main :: IO ()
 main = do
-   maybe <- translate testNew Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
+   maybe <- translate Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
    case maybe of
       Nothing  -> putStrLn "failure"
       Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML sys

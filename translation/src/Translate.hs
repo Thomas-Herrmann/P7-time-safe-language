@@ -116,7 +116,7 @@ translateCtt (ClockGCtt (Right v) n) =
     translateStatic v >>= 
         (\t -> return [Label GuardKind (t `Text.append` Text.pack (" > " ++ show n))])
 
-translateCtt _ = mzero
+translateCtt _ = liftIO (print $ "nani1") >> mzero
 
 
 simpleMergeSystems :: Text -> (Template, System) -> (Template, System) -> (Template, System)
@@ -141,7 +141,7 @@ translateExp _ _ _ _ (ValExp v) = do
 -- fix has no effect unless applied, as we force it to be wrapped around abstractions!
 translateExp _ _ _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) (ValExp (MatchVal _)))))) = nilSystem "fixAbs"
 
-translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = mzero
+translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = liftIO (print $ x) >> mzero
                                                                         | otherwise                  = do
     (temp1, sys1) <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
     (temp2, sys2) <- translateExp recSubst recVars receivables inVars e2
@@ -161,10 +161,10 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
     (temp2, sys2) <- translateExp recSubst recVars receivables inVars e2
     id            <- nextUniqueID
     case Partition.partition receivables e1 id of
-        Nothing         -> mzero
+        Nothing         -> liftIO (print $ "nani3") >> mzero
         Just (vs1, id') -> do
             case Partition.partition receivables e2 id' of
-                Nothing          -> mzero
+                Nothing          -> liftIO (print $ "nani4") >> mzero
                 Just (vs2, id'') -> do
                     setUniqueID id''
                     branchLoc    <- newLoc "branch"
@@ -236,7 +236,7 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
                            temFinal       = locId locFinish }
     id2           <- nextUniqueID
     case snapshots receivables subst e1 id2 of
-        Nothing             -> mzero
+        Nothing             -> liftIO (print $ "nani5") >> mzero
         Just (sigmas, id2') -> do
             setUniqueID id2'
             let e2' = substitute e2 subst
@@ -247,7 +247,7 @@ translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
     (temp1, sys1) <- translateExp recSubst recVars receivables inVars e1
     id1           <- nextUniqueID
     case Partition.partition receivables e1 id1 of
-        Nothing            -> mzero
+        Nothing            -> liftIO (print $ "nani6") >> mzero
         Just (vals1, id1') -> do
             setUniqueID id1'
             systems  <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e2 (Map.singleton x v)) | v <- Set.toList vals1]
@@ -292,7 +292,7 @@ translateExp recSubst recVars receivables inVars (GuardExp e g) = do
 translateExp _ _ receivables inVars (ParExp e1 e2) = do
     id <- nextUniqueID
     case multiPassSends e1 e2 2 id of
-        Nothing                            -> mzero
+        Nothing                            -> liftIO (print $ "nani7") >> mzero
         Just (sendables1, sendables2, id') -> do
             setUniqueID id'
             (temp1, sys1)    <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1
@@ -342,7 +342,7 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
                            temLocations   = temLocations temp ++ [initLoc, stopLoc1, stopLoc2],
                            temTransitions = temTransitions temp ++ newTrans }
 
-translateExp _ _ _ _ _ = mzero
+translateExp _ _ _ _ e = liftIO (print $ show e) >> mzero
 
 
 addInvariant invar loc =
@@ -359,7 +359,12 @@ locNameFromVal _ (ConVal ResetCon)              = "resetCon"
 locNameFromVal _ (ConVal OpenCon)               = "openCon"
 locNameFromVal valMap (TermVal name vs)         = Text.pack $ name ++ "_" ++ List.intercalate "_" (Prelude.map (Text.unpack . locNameFromVal valMap) vs) ++ "_"
 locNameFromVal _ (MatchVal _)                   = "matchAbs"
+locNameFromVal _ (RecMatchVal x _)              = Text.pack $ "recAbs_" ++ x
 locNameFromVal _ WorldVal                       = "world"
+locNameFromVal _ (ReceiveVal id)                = Text.pack $ "receiveChEnd_" ++ show id
+locNameFromVal _ (SendVal id)                   = Text.pack $ "sendChEnd_" ++ show id
+locNameFromVal _ (InPinVal id)                  = Text.pack $ "inPin_" ++ show id
+locNameFromVal _ (OutPinVal id)                 = Text.pack $ "outPin_" ++ show id
 
 
 newLoc :: Text -> TransT Location
@@ -376,7 +381,7 @@ translateStatic v = do
             case v of
                 SendVal id    -> updateChannel id
                 ReceiveVal id -> updateChannel id
-                _             -> mzero
+                _             -> liftIO (print $ "nani9") >> mzero
         Just t  -> return t
     where
         updateChannel :: Integer -> TransT Text
@@ -405,7 +410,7 @@ translateSync (SetSync (Right pn@(OutPinVal _)) b) = do
     pinName <- translateStatic pn
     return $ Label AssignmentKind $ pinName `Text.append` Text.pack (" := " ++ if b then "1" else "0")
 
-translateSync _ = mzero
+translateSync _ = liftIO (print $ "nani10") >> mzero
 
 
 nextUniqueID :: TransT Integer
