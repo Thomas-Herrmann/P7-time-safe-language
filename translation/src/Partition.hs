@@ -299,7 +299,7 @@ sendsExp receivables (SyncExp body) = sendsBody body
         sendsSync (GetSync (Right (InPinVal _)) _) e       = sendsExp receivables e
         sendsSync (SetSync (Right (OutPinVal _)) _) e      = sendsExp receivables e
 
-        sendsSync _ _ = mzero
+        sendsSync q _ = error $ show q -- mzero
 
 
 sendsExp receivables (GuardExp e _) = sendsExp receivables e
@@ -309,4 +309,4 @@ sendsExp receivables (ParExp e1 e2) = do
     map2 <- sendsExp receivables e2
     return $ Map.unionWith Set.union map1 map2
 
-sendsExp _ _ = mzero
+sendsExp _ _ = error "DXX" -- mzero
