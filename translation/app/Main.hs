@@ -77,10 +77,14 @@ testNew' = AppExp
                                         (ValExp (TermVal "Green" []))))))))))
                 (ValExp (TermVal "Blue" []))
 
+invarTest = InvarExp (LandCtt (ClockLCtt (Left "clkX2") 15) (ClockLCtt (Left "clkX1") 55)) [] Map.empty
+                (ValExp (ConVal ResetCon))
+                (ValExp (ConVal ResetCon))
+
 
 main :: IO ()
 main = do
-   maybe <- translate Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
+   maybe <- translate invarTest Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
    case maybe of
       Nothing  -> putStrLn "failure"
       Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML sys

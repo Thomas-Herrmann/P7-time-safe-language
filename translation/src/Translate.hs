@@ -30,9 +30,14 @@ translate e clockNames inPinNames outPinNames worldName = do
     maybe <- runStateT (runMaybeT (translateExp Map.empty Map.empty Map.empty [] e')) initState
     case maybe of
         (Nothing, _)              -> return Nothing
-        (Just (temp, sys), state) -> return $ Just sys{ sysTemplates   = temp : sysTemplates sys, 
-                                                        sysDecls       = sysDecls sys ++ stateDecls (staticMap state),
-                                                        sysSystemDecls = makeSysDecls (temp : sysTemplates sys) }
+        (Just (temp, sys), state) -> do
+            let finTrans = [Transition (temFinal temp) "Terminated" [], Transition "Terminated" "Terminated" []]
+            let temp'    = temp{  temLocations   = Location "Terminated"  [] (Just "Terminated") : temLocations temp,
+                                  temTransitions = temTransitions temp ++ finTrans,
+                                  temFinal       = "Terminated" }
+            return $ Just sys{ sysTemplates   = temp' : sysTemplates sys, 
+                               sysDecls       = sysDecls sys ++ stateDecls (staticMap state),
+                               sysSystemDecls = makeSysDecls (temp : sysTemplates sys) }
     where
         clocks n     = ClkVal n : clocks (n + 1)
         inPins n     = InPinVal n : inPins (n + 1)
@@ -87,6 +92,15 @@ nilSystem t = do
     name  <- nextTempName
     loc   <- newLoc t
     return (Template name [loc] [] [] (locId loc) (locId loc), System [] [] [] [])
+
+
+cttToInvariant :: Ctt -> Ctt
+cttToInvariant (LandCtt g1 g2)   = LandCtt (cttToInvariant g1) (cttToInvariant g2)
+cttToInvariant (ClockLeqCtt x n) = ClockLeqCtt x $ n + 1
+cttToInvariant (ClockGeqCtt x n) = ClockGeqCtt x $ n - 1
+cttToInvariant (ClockLCtt x n)   = ClockLeqCtt x n
+cttToInvariant (ClockGCtt x n)   = ClockGeqCtt x n
+cttToInvariant (LorCtt _ _)      = error "Logical OR may only be used on fail edges!"
 
 
 translateCtt :: Ctt -> TransT [Label]
@@ -225,15 +239,21 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
 
 translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     failLabels    <- translateCtt $ negateCtt g
-    [Label _ t]   <- translateCtt g
+    [guardLabel]  <- translateCtt g
+    [Label _ t]   <- translateCtt $ cttToInvariant g
+    locInit       <- newLoc "invarInit"
     locFail       <- newLoc "invarFail"
     locFinish     <- newLoc "invarDone"
     (temp1, sys1) <- translateExp recSubst recVars receivables ((failLabels, Label InvariantKind t) : inVars) e1
-    let temp1'    = temp1{ temLocations = Prelude.map (addInvariant (Label InvariantKind t)) $ temLocations temp1 }
-    let failTrans = [Transition (locId loc) (locId locFail) [failLabel] | loc <- temLocations temp1, failLabel <- failLabels]
-    let temp2     = temp1'{ temTransitions = Transition (temFinal temp1') (locId locFinish) [Label GuardKind t] : (temTransitions temp1' ++ failTrans),
-                           temLocations   = temLocations temp1' ++ [locFail, locFinish],
-                           temFinal       = locId locFinish }
+    let temp1'    = temp1{ temLocations   = Prelude.map (addInvariant (Label InvariantKind t)) $ temLocations temp1,
+                           temTransitions = Prelude.map (addGuard (guardLabel)) $ temTransitions temp1 }
+    let failTrans = [Transition (locId loc) (locId locFail) [failLabel] | loc <- locInit : temLocations temp1, failLabel <- failLabels]
+    let connTrans = [Transition (temFinal temp1') (locId locFinish) [guardLabel],
+                     Transition (locId locInit) (temInit temp1') []]
+    let temp2     = temp1'{ temTransitions = temTransitions temp1' ++ failTrans ++ connTrans,
+                            temLocations   = temLocations temp1' ++ [locInit, locFail, locFinish],
+                            temFinal       = locId locFinish,
+                            temInit        = locId locInit }
     id2           <- nextUniqueID
     case snapshots receivables subst e1 id2 of
         Nothing             -> liftIO (print $ "nani5") >> mzero
@@ -345,12 +365,22 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
 translateExp _ _ _ _ e = liftIO (print $ show e) >> mzero
 
 
+addInvariant :: Label -> Location -> Location
 addInvariant invar loc =
     let (label, labels) = Prelude.foldr extendInvar (invar, []) $ locLabels loc
     in  loc{ locLabels = label : labels }
     where
         extendInvar (Label InvariantKind t') (Label _ t, labels) = (Label InvariantKind $ t' `Text.append` " and " `Text.append` t, labels)
-        extendInvar label' (label, labels)                       = (label, label':labels) 
+        extendInvar label' (label, labels)                       = (label, label' : labels) 
+
+
+addGuard :: Label -> Transition -> Transition
+addGuard guard (Transition from to existing) =
+    let (label, labels) = Prelude.foldr extendGuard (guard, []) existing
+    in  Transition from to $ label : labels
+    where
+        extendGuard (Label GuardKind t') (Label _ t, labels) = (Label GuardKind $ t' `Text.append` " and " `Text.append` t, labels)
+        extendGuard label' (label, labels)                   = (label, label' : labels)
 
 
 locNameFromVal :: Map Val Text -> Val -> Text
