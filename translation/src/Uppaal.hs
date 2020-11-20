@@ -10,11 +10,14 @@ module Uppaal
     , Transition(..)
     , Query(..)
     , systemToXML
+    , pruneTemplate
+    , pruneSystem
     ) where
 
 import Text.XML
 import Data.Map as Map
 import Data.Text as Text
+import Data.List as List
 
 type Declaration = Text
 
@@ -116,3 +119,37 @@ instance Renderable Query where
 systemToXML :: System -> Document
 systemToXML sys = case toXML sys of
     NodeElement el -> Document (Prologue [] Nothing []) el []
+
+pruneSystem :: System -> System
+pruneSystem sys = sys { sysTemplates = Prelude.map pruneTemplate (sysTemplates sys)}
+
+pruneTemplate :: Template -> Template
+pruneTemplate temp = let (newLocs, newTrans) = prune (temLocations temp, temTransitions temp) (temLocations temp)
+                     in temp { temLocations = newLocs, temTransitions = newTrans}
+    where
+        initLoc = temInit temp
+        finalLoc = temFinal temp
+
+        prune (locs, trans) ls = 
+            let (newLocs, newTrans) = prunePass (locs, trans) ls in 
+                if Prelude.length newLocs == Prelude.length locs 
+                    then (locs, trans) 
+                    else prune (newLocs, newTrans) ls
+
+        prunePass :: ([Location], [Transition]) -> [Location] -> ([Location], [Transition])
+        prunePass (locs, trans) [] = (locs, trans)
+        prunePass (locs, trans) (l:ls) = 
+            if lId /= initLoc && (lId /= finalLoc) && -- Don't remove inital and target locations
+               Prelude.length incomingTransL == 1 && Prelude.length outgoingTransL == 1 && -- Only remove locations with 1 incoming and 1 outgoing transition
+               Prelude.null (locLabels l) && Prelude.null (traLabels iTran)
+            then prunePass (List.delete l locs, newTran:List.delete iTran (List.delete oTran trans)) ls
+            else prunePass (locs, trans) ls
+            where
+                lId = locId l
+
+                incomingTransL = Prelude.filter (\tra -> lId == traTarget tra) trans
+                outgoingTransL = Prelude.filter (\tra -> lId == traSource tra) trans
+
+                iTran = List.head incomingTransL
+                oTran = List.head outgoingTransL
+                newTran = Transition {traSource = traSource iTran, traTarget = traTarget oTran, traLabels = traLabels oTran}

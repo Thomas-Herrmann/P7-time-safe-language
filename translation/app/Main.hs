@@ -84,7 +84,7 @@ invarTest = InvarExp (LandCtt (ClockLCtt (Left "clkX2") 15) (ClockLCtt (Left "cl
 
 main :: IO ()
 main = do
-   maybe <- translate invarTest Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
+   maybe <- translate Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
    case maybe of
       Nothing  -> putStrLn "failure"
-      Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML sys
+      Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML (pruneSystem sys)
