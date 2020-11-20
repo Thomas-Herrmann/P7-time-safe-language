@@ -74,12 +74,11 @@ partitionExp receivables (InvarExp _ _ subst e1 e2) = do
 partitionExp receivables (AppExp e1 e2) = partitionExp receivables e1 >>= foldrM unionApply Set.empty
     where
         unionApply v set       = apply v <&> Set.union set
-        unionMatch body v set  = matchBody body v <&> Set.union set
-        unionPartition body    = partitionExp receivables e2 >>= foldrM (unionMatch body) Set.empty
+        unionMatch body        = partitionExp receivables e2 >>= matchBody body
 
         apply :: Val -> ParT (Set Val)
-        apply (MatchVal body)      = unionPartition body
-        apply (RecMatchVal x body) = unionPartition $ substitute body (Map.singleton x (MatchVal body)) -- Perform recursion once to hopefully find all value patterns
+        apply (MatchVal body)      = unionMatch body
+        apply (RecMatchVal x body) = unionMatch $ substitute body (Map.singleton x (MatchVal body)) -- Perform recursion once to hopefully find all value patterns
         apply (TermVal x vs)       = partitionExp receivables e2 >>= (\set -> return (Set.fromList [TermVal x (vs ++ [v]) | v <- Set.toList set]))
         apply (ConVal ResetCon)    = partitionExp receivables e2
         apply (ConVal OpenCon)     = do 
@@ -87,18 +86,24 @@ partitionExp receivables (AppExp e1 e2) = partitionExp receivables e1 >>= foldrM
             set <- partitionExp receivables e2
             return $ Set.map (\v -> TermVal "Triple" [SendVal id, ReceiveVal id, v]) set
 
-        matchBody :: MatchBody -> Val -> ParT (Set Val)
-        matchBody (SingleMatch p e) v =
-            case match p v of
-                Nothing    -> return Set.empty
-                Just sigma -> partitionExp receivables $ substitute e sigma
-        matchBody (MultiMatch p e rem) v =
-            case match p v of
-                Nothing    -> matchBody rem v
-                Just sigma -> do
-                    set  <- partitionExp receivables $ substitute e sigma
-                    set' <- matchBody rem v
-                    return $ set `Set.union` set'
+        matchSet :: Pat -> Exp -> Set Val -> ParT (Set Val)
+        matchSet p e set = foldrM (\v set' -> matchf v <&> Set.union set') Set.empty $ Set.toList set
+            where
+                    matchf v =    
+                        case match p v of
+                            Nothing    -> return Set.empty
+                            Just sigma -> partitionExp receivables $ substitute e sigma
+
+        matchBody :: MatchBody -> Set Val -> ParT (Set Val)
+        matchBody (SingleMatch p e) set = do 
+            set' <- matchSet p e set
+            when (Set.null set') mzero -- TODO: verify that this fails!
+            return set'
+
+        matchBody (MultiMatch p e rem) set = do 
+            set' <- matchSet p e set 
+            when (Set.null set') mzero -- TODO: verify that this fails!
+            matchBody rem set <&> Set.union set'
 
 partitionExp _ _ = mzero
 

@@ -16,17 +16,18 @@ import Partition
 import Uppaal
 
 data TransState = TransState {
-                               uniqueID  :: Integer
-                             , tempID    :: Integer
-                             , locID     :: Integer
-                             , staticMap :: Map Val Text
+                               shouldPrune :: Bool
+                             , uniqueID    :: Integer
+                             , tempID      :: Integer
+                             , locID       :: Integer
+                             , staticMap   :: Map Val Text
                              }
 
 type TransT a = MaybeT (StateT TransState IO) a
 
 
-translate :: Exp -> [Name] -> [Name] -> [Name] -> Name -> IO (Maybe System)
-translate e clockNames inPinNames outPinNames worldName = do
+translate :: Bool -> Exp -> [Name] -> [Name] -> [Name] -> Name -> IO (Maybe System)
+translate pruneFlag e clockNames inPinNames outPinNames worldName = do
     maybe <- runStateT (runMaybeT (translateExp Map.empty Map.empty Map.empty [] e')) initState
     case maybe of
         (Nothing, _)              -> return Nothing
@@ -49,7 +50,7 @@ translate e clockNames inPinNames outPinNames worldName = do
         clockMap     = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
         inPinMap     = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
         outPinMap    = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
-        initState    = TransState 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
+        initState    = TransState pruneFlag 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'           = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` worldSubst
 
         stateDecls :: Map Val Text -> [Declaration]
@@ -85,6 +86,14 @@ temp1 `joinTemp` temp2 = temp1{
     temTransitions = temTransitions temp1 ++ temTransitions temp2,
     temDecls       = temDecls temp1 ++ temDecls temp2
 }
+
+
+prune :: (Template, System) -> TransT (Template, System)
+prune (temp, sys) = do
+    state <- State.get
+    if shouldPrune state
+        then return (pruneTemplate temp, sys)
+        else return (temp, sys) -- Do no pruning
 
 
 nilSystem :: Text -> TransT (Template, System)
@@ -130,7 +139,7 @@ translateCtt (ClockGCtt (Right v) n) =
     translateStatic v >>= 
         (\t -> return [Label GuardKind (t `Text.append` Text.pack (" > " ++ show n))])
 
-translateCtt _ = liftIO (print $ "nani1") >> mzero
+translateCtt _ = mzero
 
 
 simpleMergeSystems :: Text -> (Template, System) -> (Template, System) -> (Template, System)
@@ -155,7 +164,7 @@ translateExp _ _ _ _ (ValExp v) = do
 -- fix has no effect unless applied, as we force it to be wrapped around abstractions!
 translateExp _ _ _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) (ValExp (MatchVal _)))))) = nilSystem "fixAbs"
 
-translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = liftIO (print $ x) >> mzero
+translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = mzero
                                                                         | otherwise                  = do
     (temp1, sys1) <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
     (temp2, sys2) <- translateExp recSubst recVars receivables inVars e2
@@ -168,17 +177,17 @@ translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map
                            temTransitions = temTransitions temp1 ++ recTrans }
     let tempRes   = (temp2 `joinTemp` temp1'){ temFinal = temFinal temp1' }
     let tempRes'  = tempRes{ temTransitions = Transition (temFinal temp2) (temInit temp1') [] : temTransitions tempRes }
-    return (tempRes', sys2 `joinSys` sys1)
+    prune (tempRes', sys2 `joinSys` sys1)
 
 translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
     (temp1, sys1) <- translateExp recSubst recVars receivables inVars e1
     (temp2, sys2) <- translateExp recSubst recVars receivables inVars e2
     id            <- nextUniqueID
     case Partition.partition receivables e1 id of
-        Nothing         -> liftIO (print $ "nani3") >> mzero
+        Nothing         -> mzero
         Just (vs1, id') -> do
             case Partition.partition receivables e2 id' of
-                Nothing          -> liftIO (print $ "nani4") >> mzero
+                Nothing          -> mzero
                 Just (vs2, id'') -> do
                     setUniqueID id''
                     branchLoc    <- newLoc "branch"
@@ -193,7 +202,7 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
                     let temp3'   = temp3{ temLocations   = temLocations temp3 ++ [branchLoc, bJoinLoc, finalLoc], 
                                           temTransitions = temTransitions temp3 ++ newTrans }
                     let (temp, sys) = Prelude.foldr (mergeSystems (locId branchLoc)) (temp3', sys1 `joinSys` sys2) systems
-                    return (temp{ temFinal = locId finalLoc }, sys)
+                    prune (temp{ temFinal = locId finalLoc }, sys)
     where
         matchBody :: MatchBody -> Val -> TransT (Set Exp)
         matchBody (SingleMatch p e) v =
@@ -244,9 +253,9 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     locInit       <- newLoc "invarInit"
     locFail       <- newLoc "invarFail"
     locFinish     <- newLoc "invarDone"
-    (temp1, sys1) <- translateExp recSubst recVars receivables ((failLabels, Label InvariantKind t) : inVars) e1
+    (temp1, sys1) <- translateExp recSubst recVars receivables ((failLabels, Label InvariantKind t) : inVars) e1 >>= prune
     let temp1'    = temp1{ temLocations   = Prelude.map (addInvariant (Label InvariantKind t)) $ temLocations temp1,
-                           temTransitions = Prelude.map (addGuard (guardLabel)) $ temTransitions temp1 }
+                           temTransitions = Prelude.map (addGuard guardLabel) $ temTransitions temp1 }
     let failTrans = [Transition (locId loc) (locId locFail) [failLabel] | loc <- locInit : temLocations temp1, failLabel <- failLabels]
     let connTrans = [Transition (temFinal temp1') (locId locFinish) [guardLabel],
                      Transition (locId locInit) (temInit temp1') []]
@@ -256,29 +265,29 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
                             temInit        = locId locInit }
     id2           <- nextUniqueID
     case snapshots receivables subst e1 id2 of
-        Nothing             -> liftIO (print $ "nani5") >> mzero
+        Nothing             -> mzero
         Just (sigmas, id2') -> do
             setUniqueID id2'
             let e2' = substitute e2 subst
             systems <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e2' sigma) | sigma <- Set.toList sigmas]
-            return $ Prelude.foldr (mergeSystems (locId locFail)) (temp2, sys1) systems  
+            prune $ Prelude.foldr (mergeSystems (locId locFail)) (temp2, sys1) systems  
 
 translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
     (temp1, sys1) <- translateExp recSubst recVars receivables inVars e1
     id1           <- nextUniqueID
     case Partition.partition receivables e1 id1 of
-        Nothing            -> liftIO (print $ "nani6") >> mzero
+        Nothing            -> mzero
         Just (vals1, id1') -> do
             setUniqueID id1'
             systems  <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e2 (Map.singleton x v)) | v <- Set.toList vals1]
             finalLoc <- newLoc "letDone"
-            return $ Prelude.foldr (mergeSystems (temFinal temp1)) (temp1{ temFinal = locId finalLoc, temLocations = finalLoc : temLocations temp1 }, sys1) systems
+            prune $ Prelude.foldr (mergeSystems (temFinal temp1)) (temp1{ temFinal = locId finalLoc, temLocations = finalLoc : temLocations temp1 }, sys1) systems
 
 translateExp recSubst recVars receivables inVars (SyncExp body) = do
     (temp, sys) <- nilSystem "syncInit"
     finalLoc    <- newLoc "syncDone"
     systems     <- translateBody (temFinal temp) body
-    return $ Prelude.foldr (simpleMergeSystems (locId finalLoc)) (temp{ temFinal = locId finalLoc, temLocations = finalLoc : temLocations temp }, sys) systems
+    prune $ Prelude.foldr (simpleMergeSystems (locId finalLoc)) (temp{ temFinal = locId finalLoc, temLocations = finalLoc : temLocations temp }, sys) systems
     where
         translateBody from (SingleSync q e)    = translateSyncPair from q e
         translateBody from (MultiSync q e rem) = do 
@@ -305,18 +314,18 @@ translateExp recSubst recVars receivables inVars (GuardExp e g) = do
     (temp, sys) <- translateExp recSubst recVars receivables inVars e
     initLoc     <- newLoc "guardInit"
     let prevInitID = temInit temp
-    return (temp{ temLocations   = initLoc : temLocations temp, 
+    prune (temp{ temLocations   = initLoc : temLocations temp, 
                   temTransitions = Transition (locId initLoc) prevInitID guard : temTransitions temp, 
                   temInit        = locId initLoc }, sys) -- we assume that our guards do not have LOR, although syntactically possible
 
 translateExp _ _ receivables inVars (ParExp e1 e2) = do
     id <- nextUniqueID
     case multiPassSends e1 e2 2 id of
-        Nothing                            -> liftIO (print $ "nani7") >> mzero
+        Nothing                            -> mzero
         Just (sendables1, sendables2, id') -> do
             setUniqueID id'
-            (temp1, sys1)    <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1
-            (temp2, sys2)    <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2
+            (temp1, sys1)    <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1 >>= prune
+            (temp2, sys2)    <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2 >>= prune
             (tempMain, sys3) <- nilSystem "parInit"
             let sys4         = sys1 `joinSys` sys2 `joinSys` sys3
             startID          <- nextUniqueID
@@ -326,7 +335,7 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
             temp2'           <- addGuards temp2 startID stopID2 inVars
             tempMain'        <- addGuardsMain tempMain startID stopID1 stopID2
             let varDecl      = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
-            return (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
+            prune (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
                                      sysDecls = varDecl : sysDecls sys4 })
     where
         varText s id kind = Text.pack $ s ++ show id ++ kind
@@ -362,7 +371,7 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
                            temLocations   = temLocations temp ++ [initLoc, stopLoc1, stopLoc2],
                            temTransitions = temTransitions temp ++ newTrans }
 
-translateExp _ _ _ _ e = liftIO (print $ show e) >> mzero
+translateExp _ _ _ _ _ = mzero
 
 
 addInvariant :: Label -> Location -> Location
@@ -411,7 +420,7 @@ translateStatic v = do
             case v of
                 SendVal id    -> updateChannel id
                 ReceiveVal id -> updateChannel id
-                _             -> liftIO (print $ "nani9") >> mzero
+                _             -> mzero
         Just t  -> return t
     where
         updateChannel :: Integer -> TransT Text
@@ -440,7 +449,7 @@ translateSync (SetSync (Right pn@(OutPinVal _)) b) = do
     pinName <- translateStatic pn
     return $ Label AssignmentKind $ pinName `Text.append` Text.pack (" := " ++ if b then "1" else "0")
 
-translateSync _ = liftIO (print $ "nani10") >> mzero
+translateSync _ = mzero
 
 
 nextUniqueID :: TransT Integer
