@@ -141,7 +141,7 @@ pruneTemplate temp = let (newLocs, newTrans) = prune (temLocations temp, temTran
         prunePass (locs, trans) (l:ls) = 
             if lId /= initLoc && (lId /= finalLoc) && -- Don't remove inital and target locations
                Prelude.length incomingTransL == 1 && Prelude.length outgoingTransL == 1 && -- Only remove locations with 1 incoming and 1 outgoing transition
-               Prelude.null (locLabels l) && Prelude.null (traLabels iTran)
+               Prelude.null (locLabels l) && Prelude.null (traLabels iTran) && Prelude.null (traLabels oTran)
             then prunePass (List.delete l locs, newTran:List.delete iTran (List.delete oTran trans)) ls
             else prunePass (locs, trans) ls
             where
@@ -152,4 +152,4 @@ pruneTemplate temp = let (newLocs, newTrans) = prune (temLocations temp, temTran
 
                 iTran = List.head incomingTransL
                 oTran = List.head outgoingTransL
-                newTran = Transition {traSource = traSource iTran, traTarget = traTarget oTran, traLabels = traLabels oTran}
+                newTran = Transition {traSource = traSource iTran, traTarget = traTarget oTran, traLabels = []}
