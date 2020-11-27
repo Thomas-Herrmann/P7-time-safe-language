@@ -46,16 +46,16 @@ data Location = Location {
                          }
                          deriving (Eq, Ord)
 
-data Label = Label Kind Text deriving (Eq, Ord)
+data Label = Label Kind Text deriving (Eq, Ord, Show)
 
-data Kind = InvariantKind | GuardKind | AssignmentKind | SyncKind deriving (Eq, Ord)
+data Kind = InvariantKind | GuardKind | AssignmentKind | SyncKind deriving (Eq, Ord, Show)
 
 data Transition = Transition { 
                                traSource :: Text
                              , traTarget :: Text
                              , traLabels :: [Label]
                              }
-                             deriving (Eq, Ord)
+                             deriving (Eq, Ord, Show)
 
 data Query = Query Text Text deriving (Eq, Ord)
 
@@ -128,7 +128,6 @@ pruneTemplate temp = let (newLocs, newTrans) = prune (temLocations temp, temTran
                      in temp { temLocations = newLocs, temTransitions = newTrans}
     where
         initLoc = temInit temp
-        finalLoc = temFinal temp
 
         prune (locs, trans) ls = 
             let (newLocs, newTrans) = prunePass (locs, trans) ls in 
@@ -138,12 +137,16 @@ pruneTemplate temp = let (newLocs, newTrans) = prune (temLocations temp, temTran
 
         prunePass :: ([Location], [Transition]) -> [Location] -> ([Location], [Transition])
         prunePass (locs, trans) [] = (locs, trans)
-        prunePass (locs, trans) (l:ls) = 
-            if lId /= initLoc && (lId /= finalLoc) && -- Don't remove inital and target locations
-               Prelude.length incomingTransL == 1 && Prelude.length outgoingTransL == 1 && -- Only remove locations with 1 incoming and 1 outgoing transition
-               Prelude.null (locLabels l) && Prelude.null (traLabels iTran) && Prelude.null (traLabels oTran)
-            then prunePass (List.delete l locs, newTran:List.delete iTran (List.delete oTran trans)) ls
-            else prunePass (locs, trans) ls
+        prunePass (locs, trans) (l:ls) =
+            case () of 
+               _ | lId /= initLoc && -- Don't remove inital locations
+                   Prelude.length incomingTransL == 1 && Prelude.length outgoingTransL == 1 && -- Only remove locations with 1 incoming and 1 outgoing transition
+                   Prelude.null (locLabels l) && Prelude.null (traLabels iTran) && Prelude.null (traLabels oTran) ->
+                    prunePass (List.delete l locs, newTran:List.delete iTran (List.delete oTran trans)) ls
+                 | Prelude.null incomingTransL && Prelude.null outgoingTransL ->
+                    prunePass (List.delete l locs, trans) ls
+                 | otherwise -> 
+                    prunePass (locs, trans) ls
             where
                 lId = locId l
 

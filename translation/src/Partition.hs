@@ -67,7 +67,7 @@ partitionExp receivables (ParExp e1 e2) = do
 partitionExp receivables (InvarExp _ _ subst e1 e2) = do
     set1    <- partitionExp receivables e1
     sigmas  <- snapshotsExp receivables subst e1
-    let e2' = substitute e2 subst
+    let e2' = substitute e2 subst -- TODO: verify that this is right?
     setList <- Prelude.sequence [partitionExp receivables (substitute e2' sigma) | sigma <- Set.toList sigmas]
     return $ Prelude.foldr Set.union set1 setList
 
@@ -202,7 +202,7 @@ snapshotsAux receivables (SyncExp body) = snapshotsBody body
             return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
 
         snapshotsSync (ReceiveSync (Right (ReceiveVal _)) _) _ = return Map.empty
-        snapshotsSync (ReceiveSync _ _) _                       = mzero
+        snapshotsSync (ReceiveSync _ _) _                      = mzero
 
         snapshotsSync _ e = snapshotsAux receivables e
 
@@ -304,7 +304,7 @@ sendsExp receivables (SyncExp body) = sendsBody body
         sendsSync (GetSync (Right (InPinVal _)) _) e       = sendsExp receivables e
         sendsSync (SetSync (Right (OutPinVal _)) _) e      = sendsExp receivables e
 
-        sendsSync q _ = error $ show q -- mzero
+        sendsSync _ _ = mzero
 
 
 sendsExp receivables (GuardExp e _) = sendsExp receivables e
@@ -314,4 +314,4 @@ sendsExp receivables (ParExp e1 e2) = do
     map2 <- sendsExp receivables e2
     return $ Map.unionWith Set.union map1 map2
 
-sendsExp _ _ = error "DXX" -- mzero
+sendsExp _ _ = mzero
