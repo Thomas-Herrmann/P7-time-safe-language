@@ -26,8 +26,12 @@ data TransState = TransState {
 type TransT a = MaybeT (StateT TransState IO) a
 
 
-translate :: Bool -> Exp -> [Name] -> [Name] -> [Name] -> Name -> IO (Maybe System)
-translate pruneFlag e clockNames inPinNames outPinNames worldName = do
+liftMaybe :: Maybe a -> MaybeT (StateT TransState IO) a
+liftMaybe = maybe mzero return
+
+
+translate :: Bool -> Exp -> [Name] -> [Name] -> [Name] -> [(Name, Name)] -> IO (Maybe System)
+translate pruneFlag e clockNames inPinNames outPinNames chanNames = do
     maybe <- runStateT (runMaybeT (translateExp Map.empty Map.empty Map.empty [] e' >>= prune)) initState
     case maybe of
         (Nothing, _)                   -> return Nothing
@@ -39,18 +43,19 @@ translate pruneFlag e clockNames inPinNames outPinNames worldName = do
                                sysDecls       = sysDecls sys ++ stateDecls (staticMap state),
                                sysSystemDecls = makeSysDecls (temp : sysTemplates sys) }
     where
-        clocks n     = ClkVal n : clocks (n + 1)
-        inPins n     = InPinVal n : inPins (n + 1)
-        outPins n    = OutPinVal n : outPins (n + 1)
-        clockSubst   = Map.fromList $ Prelude.zip clockNames $ clocks 0
-        inPinsSubst  = Map.fromList $ Prelude.zip inPinNames $ inPins 0
-        outPinsSubst = Map.fromList $ Prelude.zip outPinNames $ outPins 0
-        worldSubst   = Map.singleton worldName WorldVal
-        clockMap     = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
-        inPinMap     = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
-        outPinMap    = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
-        initState    = TransState pruneFlag 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
-        e'           = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` worldSubst
+        clocks n       = ClkVal n : clocks (n + 1)
+        inPins n       = InPinVal n : inPins (n + 1)
+        outPins n      = OutPinVal n : outPins (n + 1)
+        channels n     = (SendVal n, ReceiveVal n) : channels (n + 1)
+        clockSubst     = Map.fromList $ Prelude.zip clockNames $ clocks 0
+        inPinsSubst    = Map.fromList $ Prelude.zip inPinNames $ inPins 0
+        outPinsSubst   = Map.fromList $ Prelude.zip outPinNames $ outPins 0
+        (chanSubst, _) = Prelude.foldr (\(sn, rn) (map, (s, r):chs) -> (map `Map.union` Map.fromList [(sn, s), (rn, r)], chs)) (Map.empty, channels 0) chanNames
+        clockMap       = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
+        inPinMap       = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
+        outPinMap      = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
+        initState      = TransState pruneFlag 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
+        e'             = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` chanSubst
 
         stateDecls :: Map Val Text -> [Declaration]
         stateDecls map = Map.foldrWithKey makeDecl [] map
@@ -262,12 +267,6 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
                                           temTransitions = Transition (temInit temp) (locId finalLoc) [label] : temTransitions temp }, 
                                     sys, Map.singleton v2 (Set.singleton (locId finalLoc)))
 
-        apply (ConVal OpenCon) v2 _ _ = do 
-            (temp, sys) <- nilSystem "appOpen"
-            id          <- nextUniqueID
-            let map     = Map.singleton (TermVal "Triple" [SendVal id, ReceiveVal id, v2]) $ Set.singleton (temInit temp)
-            return $ Set.singleton (temp, sys, map)
-
 translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     failLabels    <- translateCtt $ negateCtt g
     [guardLabel]  <- translateCtt g
@@ -283,15 +282,11 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     let temp2     = temp1'{ temTransitions = temTransitions temp1' ++ failTrans ++ succTrans ++ [connTrans],
                             temLocations   = temLocations temp1' ++ [locInit, locFail] ++ locs,
                             temInit        = locId locInit }
-    id2           <- nextUniqueID
-    case snapshots receivables subst e1 id2 of
-        Nothing             -> mzero
-        Just (sigmas, id2') -> do
-            setUniqueID id2'
-            let e2'      = substitute e2 subst
-            systems      <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e2' sigma) | sigma <- Set.toList sigmas]
-            let systems' = Prelude.map (\(temp, sys, map) -> (temp{ temTransitions = Transition (locId locFail) (temInit temp) [] : temTransitions temp }, sys, map)) systems
-            prune $ Prelude.foldr joinTuples (temp2, sys1, map1') systems' 
+    sigmas        <- liftMaybe $ snapshots receivables subst e1
+    let e2'       = substitute e2 subst
+    systems       <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e2' sigma) | sigma <- Set.toList sigmas]
+    let systems'  = Prelude.map (\(temp, sys, map) -> (temp{ temTransitions = Transition (locId locFail) (temInit temp) [] : temTransitions temp }, sys, map)) systems
+    prune $ Prelude.foldr joinTuples (temp2, sys1, map1') systems' 
     where
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, Map.unionWith Set.union m2 m1)
 
@@ -352,27 +347,23 @@ translateExp recSubst recVars receivables inVars (GuardExp e g) = do
                 temInit        = locId initLoc }, sys, map) -- we assume that our guards do not have LOR, although syntactically possible
 
 translateExp _ _ receivables inVars (ParExp e1 e2) = do
-    id <- nextUniqueID
-    case multiPassSends e1 e2 2 id of
-        Nothing                            -> mzero
-        Just (sendables1, sendables2, id') -> do
-            setUniqueID id'
-            (temp1, sys1, map1) <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1 >>= prune
-            (temp2, sys2, map2) <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2 >>= prune
-            (intValMap1, var1)  <- setUpVarBranch map1
-            (intValMap2, var2)  <- setUpVarBranch map2
-            (tempMain, sys3)    <- nilSystem "parInit"
-            let sys4            = sys1 `joinSys` sys2 `joinSys` sys3
-            startID             <- nextUniqueID
-            stopID1             <- nextUniqueID
-            stopID2             <- nextUniqueID
-            temp1'              <- addGuards temp1 intValMap1 map1 var1 startID stopID1 inVars
-            temp2'              <- addGuards temp2 intValMap2 map2 var2 startID stopID2 inVars
-            (tempMain', mapRes) <- addGuardsMain tempMain intValMap1 var1 intValMap2 var2 startID stopID1 stopID2
-            let varDecl         = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
-            let varDecl'        = "int " `Text.append` var1 `Text.append` ", " `Text.append` var2 `Text.append` ";\n" `Text.append` varDecl
-            prune (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
-                                    sysDecls = varDecl' : sysDecls sys4 }, mapRes)
+    (sendables1, sendables2) <- liftMaybe $ multiPassSends e1 e2 2
+    (temp1, sys1, map1)      <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1 >>= prune
+    (temp2, sys2, map2)      <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2 >>= prune
+    (intValMap1, var1)       <- setUpVarBranch map1
+    (intValMap2, var2)       <- setUpVarBranch map2
+    (tempMain, sys3)         <- nilSystem "parInit"
+    let sys4                 = sys1 `joinSys` sys2 `joinSys` sys3
+    startID                  <- nextUniqueID
+    stopID1                  <- nextUniqueID
+    stopID2                  <- nextUniqueID
+    temp1'                   <- addGuards temp1 intValMap1 map1 var1 startID stopID1 inVars
+    temp2'                   <- addGuards temp2 intValMap2 map2 var2 startID stopID2 inVars
+    (tempMain', mapRes)      <- addGuardsMain tempMain intValMap1 var1 intValMap2 var2 startID stopID1 stopID2
+    let varDecl              = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
+    let varDecl'             = "int " `Text.append` var1 `Text.append` ", " `Text.append` var2 `Text.append` ";\n" `Text.append` varDecl
+    prune (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
+                            sysDecls = varDecl' : sysDecls sys4 }, mapRes)
     where
         varText s id kind = Text.pack $ s ++ show id ++ kind
 
@@ -452,11 +443,9 @@ addGuard guard (Transition from to existing) =
 locNameFromVal :: Map Val Text -> Val -> Text
 locNameFromVal valMap v | v `Map.member` valMap = (valMap ! v) `Text.append` "_"
 locNameFromVal _ (ConVal ResetCon)              = "resetCon"
-locNameFromVal _ (ConVal OpenCon)               = "openCon"
 locNameFromVal valMap (TermVal name vs)         = Text.pack $ name ++ "_" ++ List.intercalate "_" (Prelude.map (Text.unpack . locNameFromVal valMap) vs) ++ "_"
 locNameFromVal _ (MatchVal _)                   = "matchAbs"
 locNameFromVal _ (RecMatchVal x _)              = Text.pack $ "recAbs_" ++ x
-locNameFromVal _ WorldVal                       = "world"
 locNameFromVal _ (ReceiveVal id)                = Text.pack $ "receiveChEnd_" ++ show id
 locNameFromVal _ (SendVal id)                   = Text.pack $ "sendChEnd_" ++ show id
 locNameFromVal _ (InPinVal id)                  = Text.pack $ "inPin_" ++ show id
@@ -513,11 +502,6 @@ nextUniqueID :: TransT Integer
 nextUniqueID = State.get >>= 
     (\state -> State.put state{ uniqueID = uniqueID state + 1 } >> 
     return (uniqueID state))
-
-
-setUniqueID :: Integer -> TransT ()
-setUniqueID n = State.get >>=
-    (\state -> State.put state{ uniqueID = n })
 
 
 nextTempName :: TransT Text

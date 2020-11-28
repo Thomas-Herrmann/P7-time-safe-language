@@ -62,7 +62,7 @@ negateCtt (ClockLCtt clk n)   = ClockGeqCtt clk n
 negateCtt (ClockGCtt clk n)   = ClockLeqCtt clk n
 
 
-data Con = ResetCon | OpenCon deriving (Eq, Ord, Show)
+data Con = ResetCon deriving (Eq, Ord, Show)
 
 data Val = ConVal Con
          | TermVal Name [Val]
@@ -73,10 +73,10 @@ data Val = ConVal Con
          | SendVal Integer    --
          | InPinVal Integer   -- Integer corresponds to in pin ID
          | OutPinVal Integer  -- Integer corresponds to out pin ID
-         | WorldVal
          deriving (Eq, Ord, Show)
 
 
+-- Type class representing the definitions of free variables and explicit substitutions
 class Substitutable a where
     fv :: a -> Set Name
     substitute :: a -> Subst -> a
