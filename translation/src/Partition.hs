@@ -28,10 +28,14 @@ partition _ (ValExp v) = return $ Set.singleton v
 partition _ (RefExp _) = return Set.empty
 partition _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat x) (ValExp (MatchVal body)))))) = return $ Set.singleton (RecMatchVal x body)
 partition receivables (GuardExp e _) = partition receivables e
+-- The possible values are the possible values of all variants of e2 with 'x' substituted for some value in partition(e1)
 partition receivables (LetExp x e1 e2) = partition receivables e1 >>= foldrM fun Set.empty
     where
         fun v set = (partition receivables . substitute e2) (Map.singleton x v) <&> Set.union set
 
+-- The possible values are the possible values of all the synchronization branches.
+-- If the synchronization is to receive on a channel,
+-- we substitute for values in the 'receivables' set for the channel.
 partition receivables (SyncExp body) = partitionBody body
     where
         partitionBody :: SyncBody -> Maybe (Set Val)
@@ -42,10 +46,13 @@ partition receivables (SyncExp body) = partitionBody body
             return $ set `Set.union` set'
 
         partitionSync :: Sync -> Exp -> Maybe (Set Val)
+        -- We have a binding in 'receivables' for the channel to be received on,
+        -- recursively call partition on 'e' with 'x' substituted for each possible value to be received.
         partitionSync (ReceiveSync (Right (ReceiveVal id)) x) e | id `Map.member` receivables = do
             setList <- Prelude.sequence [partition receivables (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
             return $ Prelude.foldr Set.union Set.empty setList
 
+        -- It is not possible to receive a value on the channel, so the empty set is returned
         partitionSync (ReceiveSync (Right (ReceiveVal _)) _) _    = return Set.empty
         partitionSync (SendSync (Right (SendVal _)) _ (Just _)) e = partition receivables e
         partitionSync (GetSync (Right (InPinVal _)) _) e          = partition receivables e
@@ -53,11 +60,17 @@ partition receivables (SyncExp body) = partitionBody body
 
         partitionSync _ _ = mzero
 
+-- As a parallel composition reduces to a 'Pair' term,
+-- we call partition on the two subexpressions and return all possible pairs.
 partition receivables (ParExp e1 e2) = do
     set1 <- partition receivables e1
     set2 <- partition receivables e2
     return $ Set.fromList [TermVal "Pair" [v1, v2] | v1 <- Set.toList set1, v2 <- Set.toList set2]
 
+-- For invariants, the possible values are found by recursively calling partition on e1 and e2.
+-- However, for e2 the values may depend on how much e1 was reduced before failure.
+-- Thus, we use the snapshots function on e1 to find all the possible substitutions,
+-- representing the progress in e1 upon timeout.
 partition receivables (InvarExp _ _ subst e1 e2) = do
     set1    <- partition receivables e1
     sigmas  <- snapshots receivables subst e1
@@ -65,6 +78,9 @@ partition receivables (InvarExp _ _ subst e1 e2) = do
     setList <- Prelude.sequence [partition receivables (substitute e2' sigma) | sigma <- Set.toList sigmas]
     return $ Prelude.foldr Set.union set1 setList
 
+-- For function application, we recursively call partition on e1 and e2.
+-- We require that all possible values of e1 are of function type.
+-- The possible values then depend on the function types.
 partition receivables (AppExp e1 e2) = partition receivables e1 >>= foldrM unionApply Set.empty
     where
         unionApply v set       = apply v <&> Set.union set
@@ -88,17 +104,21 @@ partition receivables (AppExp e1 e2) = partition receivables e1 >>= foldrM union
         matchBody :: MatchBody -> Set Val -> Maybe (Set Val)
         matchBody (SingleMatch p e) set = do 
             set' <- matchSet p e set
-            when (Set.null set') mzero -- TODO: verify that this fails!
+            when (Set.null set') mzero
             return set'
 
         matchBody (MultiMatch p e rem) set = do 
             set' <- matchSet p e set 
-            when (Set.null set') mzero -- TODO: verify that this fails!
+            when (Set.null set') mzero
             matchBody rem set <&> Set.union set'
 
+-- None of the valid patterns were matched, fail.
 partition _ _ = mzero
 
 
+-- Implementation of the match function.
+-- Tries to match the specified pattern and value.
+-- Upon success, a substitution "partitioning" the value over the pattern variables is returned.
 match :: Pat -> Val -> Maybe Subst
 match (RefPat x) v                                                                     = Just $ Map.singleton x v
 match (TermPat x ps) (TermVal y vs) | x == y && Prelude.length ps == Prelude.length vs = Prelude.foldr accumulator (Just Map.empty) $ Prelude.zip ps vs
@@ -112,7 +132,17 @@ match (TermPat x ps) (TermVal y vs) | x == y && Prelude.length ps == Prelude.len
 match _ _ = Nothing
 
 
+-- Implementation of the snapshots function.
+-- Tries to find the set of possible substitutions of the specified expression,
+-- representing the steps in its reduction sequence.
+-- The specified substitution contains the variables we are interested in,
+-- as well as their default value (before reduction of the expression).
+-- The function overapproximates in that it returns all substitutions,
+-- constructable using the cartesian product on the set of possible values for each variable,
+-- whereas it is often the case that reduction of the expression affects variables in a clear order.
 snapshots :: Map Integer (Set Val) -> Subst -> Exp -> Maybe (Set Subst)
+-- snapshotsAux returns a map from variables to sets of possible values,
+-- we construct the substitutions based on the cartesian product of the set for each value.
 snapshots receivables subst e = do
     possibilityMap <- snapshotsAux receivables e
     return $ cartesianProduct $ Map.mapWithKey addDefault possibilityMap
@@ -126,9 +156,16 @@ snapshots receivables subst e = do
                         | otherwise            = vs `Set.union` Set.singleton (TermVal "Nothing" [])
 
 
+-- Implementation of the auxiliary function for snapshot.
+-- Returns a map from variables to sets of possible values of these variables.
+-- We are only interested in synchronizations here.
 snapshotsAux :: Map Integer (Set Val) -> Exp -> Maybe (Map Name (Set Val))
-snapshotsAux _ (ValExp _)               = return Map.empty
-snapshotsAux _ (RefExp _)               = return Map.empty
+snapshotsAux _ (ValExp _) = return Map.empty
+snapshotsAux _ (RefExp _) = return Map.empty
+
+-- Synchronizations may appear in e1, e2 or in any of the resulting function bodies in a function application.
+-- Thus, we recursively call snapshotsAux on e1 and e2, and use the partition function to find the possible applied function bodies,
+-- on which we call snapShotsAux recursively.
 snapshotsAux receivables (AppExp e1 e2) = do
     map1 <- snapshotsAux receivables e1
     map2 <- snapshotsAux receivables e2
@@ -137,6 +174,7 @@ snapshotsAux receivables (AppExp e1 e2) = do
     map3 <- applySnapshots (Set.toList vs1) (Set.toList vs2)
     return $ Map.unionWith Set.union (Map.unionWith Set.union map1 map2) map3
     where
+        -- We are only interested in functions with bodies
         getExps (MatchVal body) v2      = matchBody body v2
         getExps (RecMatchVal x body) v2 = matchBody (substitute body (Map.singleton x (MatchVal body))) v2
         getExps _ _                     = Set.empty
@@ -160,18 +198,29 @@ snapshotsAux receivables (AppExp e1 e2) = do
 
 snapshotsAux _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = return Map.empty
 
+-- For invariants, we first call snapshotsAux recursively on e1.
+-- We then must call snapshots on e1,
+-- to find the possible variants of e2, on which we recursively call snapshotsAux,
+-- as there may be synchronizations in these.
 snapshotsAux receivables (InvarExp _ _ subst e1 e2) = do
     map1    <- snapshotsAux receivables e1
     set1    <- snapshots receivables subst e1
     mapList <- Prelude.sequence [snapshotsAux receivables (substitute e2 sigma) | sigma <- Set.toList set1]
     return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
 
+-- Let expressions are similar to invariants,
+-- expect we call partition rather than snapshots,
+-- as we must find the possible values of 'x' to construct the variants of e2.
 snapshotsAux receivables (LetExp x e1 e2) = do
     map1    <- snapshotsAux receivables e1
     vs1     <- partition receivables e1
     mapList <- Prelude.sequence [snapshotsAux receivables (substitute e2 (Map.singleton x v)) | v <- Set.toList vs1]
     return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
 
+-- For synchronization expressions, we are interested in receiving synchronizations and the branch expressions.
+-- We construct a singleton map for each receiving synchronization, 
+-- based on the possible values that may be received on the corresponding channel.
+-- We recursively call snapshotsAux on the synchronization branches.
 snapshotsAux receivables (SyncExp body) = snapshotsBody body
     where
         snapshotsBody (SingleSync q e)    = snapshotsSync q e
@@ -180,11 +229,13 @@ snapshotsAux receivables (SyncExp body) = snapshotsBody body
             map2 <- snapshotsBody rem
             return $ Map.unionWith Set.union map1 map2
 
+        -- It is possible to receive a value on the channel, build a singleton map, corresponding to the values
         snapshotsSync (ReceiveSync (Right (ReceiveVal id)) x) e | id `Map.member` receivables = do
             let map1 = Map.singleton x $ receivables ! id
             mapList <- Prelude.sequence [snapshotsAux receivables (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
             return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
 
+        -- It is not possible to receive a value on the channel, return the empty map
         snapshotsSync (ReceiveSync (Right (ReceiveVal _)) _) _ = return Map.empty
         snapshotsSync (ReceiveSync _ _) _                      = mzero
 
@@ -192,11 +243,14 @@ snapshotsAux receivables (SyncExp body) = snapshotsBody body
 
 snapshotsAux receivables (GuardExp e _) = snapshotsAux receivables e
 
+-- There may be synchronization expressions in either e1 or e2,
+-- so we recursively call snapshotsAux on them.
 snapshotsAux receivables (ParExp e1 e2) = do
     map1 <- snapshotsAux receivables e1
     map2 <- snapshotsAux receivables e2
     return $ Map.unionWith Set.union map1 map2
 
+-- None of the valid patterns were matched, fail
 snapshotsAux _ _ = mzero
 
 
