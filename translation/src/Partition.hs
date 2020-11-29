@@ -254,6 +254,10 @@ snapshotsAux receivables (ParExp e1 e2) = do
 snapshotsAux _ _ = mzero
 
 
+-- Function that iteratively applies the sends function to the two specified expressions.
+-- The specified integer determines the number of iterations.
+-- Each iteration, the previous maps are specified as the new receivables.
+-- Thus, the function simulates possible iterative synchronizations between two expressions in a parallel composition.
 multiPassSends :: Exp -> Exp -> Integer -> Maybe (Map Integer (Set Val), Map Integer (Set Val))
 multiPassSends e1 e2 = multiPassAux Map.empty Map.empty
     where
@@ -265,9 +269,15 @@ multiPassSends e1 e2 = multiPassAux Map.empty Map.empty
             multiPassAux map2 map1 $ n - 1
 
 
+-- Implementation of the sends function, 
+-- tries to find a map from channel identifiers to sets of possible values to be sent/received.
 sends :: Map Integer (Set Val) -> Exp -> Maybe (Map Integer (Set Val))
 sends _ (ValExp _)               = return Map.empty
 sends _ (RefExp _)               = return Map.empty
+
+-- In a function application, we may synchronize in e1, e2 or any function body.
+-- Thus, we apply sends recursively on these.
+-- We use the partition function to find the possible function bodies.
 sends receivables (AppExp e1 e2) = do 
     map1 <- sends receivables e1 
     map2 <- sends receivables e2
@@ -276,6 +286,7 @@ sends receivables (AppExp e1 e2) = do
     map3 <- applySends (Set.toList vs1) (Set.toList vs2)
     return $ Map.unionWith Set.union (Map.unionWith Set.union map1 map2) map3
     where
+        -- We are only interested in functions with a body
         getExps (MatchVal body) v2      = matchBody body v2
         getExps (RecMatchVal x body) v2 = matchBody (substitute body (Map.singleton x (MatchVal body))) v2
         getExps _ _                     = Set.empty
@@ -298,18 +309,28 @@ sends receivables (AppExp e1 e2) = do
     
 sends _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat _) _)))) = return Map.empty
 
+-- For invariants, we use the snapshots function to find the possible variants of the fail-body.
+-- We may synchronize in either e1 or any variants of the fail body, so we apply sends recursively.
 sends receivables (InvarExp _ _ subst e1 e2) = do 
     map1    <- sends receivables e1
     sigmas  <- snapshots receivables subst e1
     mapList <- Prelude.sequence [sends receivables (substitute e2 sigma) | sigma <- Set.toList sigmas]
     return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
 
+-- Let expressions are similar to invariants,
+-- except we apply the partition function to find all possible values 'x' may be.
+-- We then apply sends recursively on e1 and on all variants of e2.
 sends receivables (LetExp x e1 e2) = do 
     map1    <- sends receivables e1
     vs1     <- partition receivables e1
     mapList <- Prelude.sequence [sends receivables (substitute e2 (Map.singleton x v)) | v <- Set.toList vs1]
     return $ Prelude.foldr (Map.unionWith Set.union) map1 mapList
 
+-- In a synchronization expression, we may synchronize in all branching expressions,
+-- so we call sends recursively on these.
+-- Furthermore, we must account for all 'sending synchronizations'.
+-- For each of these, we determine the possible values we may send,
+-- and return a singleton map from the corresponding channel to the possible values.
 sends receivables (SyncExp body) = sendsBody body
     where
         sendsBody :: SyncBody -> Maybe (Map Integer (Set Val))
@@ -336,9 +357,12 @@ sends receivables (SyncExp body) = sendsBody body
 
 sends receivables (GuardExp e _) = sends receivables e
 
+-- We may synchronize in a nested parallel composition,
+-- so we call sends recursively on e1 and e2.
 sends receivables (ParExp e1 e2) = do 
     map1 <- sends receivables e1 
     map2 <- sends receivables e2
     return $ Map.unionWith Set.union map1 map2
 
+-- None of the valid patterns were matched, fail.
 sends _ _ = mzero
