@@ -143,7 +143,7 @@ translateCtt (ClockGCtt (Right v) n) =
     translateStatic v >>= 
         (\t -> return [Label GuardKind (t `Text.append` Text.pack (" > " ++ show n))])
 
-translateCtt _ = mzero
+translateCtt _ = liftIO $ print "1" >> mzero
 
 
 translateExp :: Subst -> Map Name (Text, Text) -> Map Integer (Set Val) -> [([Label], Label)] -> Exp -> TransT (Template, System, Map Val (Set Text))
@@ -157,7 +157,7 @@ translateExp _ _ _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat x) (ValExp (
     (temp, sys) <- nilSystem "fixAbs"
     return (temp, sys, Map.singleton (RecMatchVal x body) $ Set.singleton (temInit temp))
 
-translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = mzero
+translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = liftIO $ print "2" >>  mzero
                                                                         | otherwise                  = do
     (temp1, sys1)       <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
     (temp2, sys2, map1) <- translateExp recSubst recVars receivables inVars e2
@@ -304,7 +304,7 @@ translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, m2 `Map.union` m1)
 
         addTransitions :: Map Val (Set Text) -> Val -> TransT (Template, System, Map Val (Set Text)) -> TransT (Template, System, Map Val (Set Text))
-        addTransitions map v monad | v `Map.notMember` map = mzero
+        addTransitions map v monad | v `Map.notMember` map = liftIO $ print "3" >>  mzero
                                    | otherwise             = do
             (temp, sys, map') <- monad
             let newTrans      = [Transition id (temInit temp) [] | id <- Set.toList $ map ! v]
@@ -418,7 +418,7 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
                     return ((TermVal "Pair" [v1, v2], loc), trans)
                                                   
 
-translateExp _ _ _ _ _ = mzero
+translateExp _ _ _ _ e = liftIO $ print e >>  mzero
 
 
 addInvariant :: Label -> Location -> Location
@@ -465,7 +465,7 @@ translateStatic v = do
             case v of
                 SendVal id    -> updateChannel id
                 ReceiveVal id -> updateChannel id
-                _             -> mzero
+                _             -> liftIO $ print "5" >>  mzero
         Just t  -> return t
     where
         updateChannel :: Integer -> TransT Text
@@ -494,7 +494,7 @@ translateSync (SetSync (Right pn@(OutPinVal _)) b) = do
     pinName <- translateStatic pn
     return $ Label AssignmentKind $ pinName `Text.append` Text.pack (" := " ++ if b then "1" else "0")
 
-translateSync _ = mzero
+translateSync _ = liftIO $ print "6" >>  mzero
 
 
 nextUniqueID :: TransT Integer
