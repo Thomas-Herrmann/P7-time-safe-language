@@ -197,7 +197,6 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
             let systems         = Prelude.foldr Set.union Set.empty systemSets
             let temp3           = temp1 `joinTemp` temp2
             let newTrans        = makePlainTrans (Map.elems map1) (temInit temp2) ++ makePlainTrans (Map.elems map2) (locId branchLoc)
-            liftIO $ print newTrans
             let temp3'          = temp3{ temLocations   = temLocations temp3 ++ [branchLoc, bJoinLoc], 
                                          temTransitions = temTransitions temp3 ++ newTrans }
             prune $ Prelude.foldr joinTuples (temp3', sys1 `joinSys` sys2, Map.empty) systems
