@@ -40,18 +40,6 @@ testE = (LetExp "x"
                         (ValExp (ConVal ResetCon)) 
                         (RefExp "x")))
 
-testE2 = (AppExp 
-                (ValExp (MatchVal (SingleMatch 
-                        (TermPat "Triple" [RefPat "ch", RefPat "ch'", RefPat "w'"]) 
-                        ((ParExp 
-                                (SyncExp (SingleSync (ReceiveSync (Left "ch'") "res") (ValExp (ConVal ResetCon)))) 
-                                (SyncExp (SingleSync (SendSync (Left "ch") "clk1" Nothing) (ValExp (ConVal ResetCon))))))))) 
-                (AppExp 
-                        (ValExp (ConVal OpenCon)) 
-                        (RefExp "w")))
-
-testE2'' = InvarExp (ClockLeqCtt (Left "clk1") 25) [] Map.empty testE2 (ValExp (ConVal ResetCon))
-
 
 number n | n <= 0    = TermVal "Null" []
          | otherwise = TermVal "Succ" [number $ n - 1]
@@ -84,7 +72,7 @@ invarTest = InvarExp (LandCtt (ClockLCtt (Left "clkX2") 15) (ClockLCtt (Left "cl
 
 main :: IO ()
 main = do
-   maybe <- translate True Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.worldName
+   maybe <- translate True Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.channelNames
    case maybe of
       Nothing  -> putStrLn "failure"
       Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML sys
