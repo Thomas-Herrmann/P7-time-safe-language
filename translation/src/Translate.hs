@@ -37,7 +37,7 @@ translate pruneFlag e clockNames inPinNames outPinNames chanNames = do
         (Nothing, _)                   -> return Nothing
         (Just (temp, sys, map), state) -> do
             let finTrans = Transition "Terminated" "Terminated" [] : Map.foldr (\set l -> [Transition id "Terminated" [] | id <- Set.toList set] ++ l) [] map
-            let temp'    = temp{  temLocations   = Location "Terminated"  [] (Just "Terminated") : temLocations temp,
+            let temp'    = temp{  temLocations   = Location "Terminated"  [] (Just "Terminated") NormalType : temLocations temp,
                                   temTransitions = temTransitions temp ++ finTrans }
             return $ Just sys{ sysTemplates   = temp' : sysTemplates sys, 
                                sysDecls       = sysDecls sys ++ stateDecls (staticMap state),
@@ -454,7 +454,7 @@ locNameFromVal _ (OutPinVal id)                 = Text.pack $ "outPin_" ++ show 
 newLoc :: Text -> TransT Location
 newLoc t = do
     locID <- nextLocID
-    return $ Location locID [] $ Just (t `Text.append` locID)
+    return $ Location locID [] (Just (t `Text.append` locID)) NormalType
 
 
 translateStatic :: Val -> TransT Text
