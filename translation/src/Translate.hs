@@ -338,12 +338,14 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
 
 translateExp recSubst recVars receivables inVars (GuardExp e g) = do
     guard            <- translateCtt g
+    [Label _ invar]  <- translateCtt $ cttToInvariant g
     (temp, sys, map) <- translateExp recSubst recVars receivables inVars e
     initLoc          <- newLoc "guardInit"
-    let prevInitID = temInit temp
-    prune (temp{ temLocations  = initLoc : temLocations temp, 
-                temTransitions = Transition (locId initLoc) prevInitID guard : temTransitions temp, 
-                temInit        = locId initLoc }, sys, map) -- we assume that our guards do not have LOR, although syntactically possible
+    interLoc         <- newLoc "guardSatisfied" <&> \loc -> loc{ locLabels = [Label InvariantKind invar] }
+    let newTrans     = [Transition (locId initLoc) (locId interLoc) guard, Transition (locId interLoc) (temInit temp) guard]
+    prune (temp{ temLocations   = [initLoc, interLoc] ++ temLocations temp, 
+                 temTransitions = newTrans ++ temTransitions temp, 
+                 temInit        = locId initLoc }, sys, map) -- we assume that our guards do not have LOR, although syntactically possible
 
 translateExp _ _ receivables inVars (ParExp e1 e2) = do
     (sendables1, sendables2) <- liftMaybe $ multiPassSends e1 e2 2
@@ -454,7 +456,7 @@ locNameFromVal _ (OutPinVal id)                 = Text.pack $ "outPin_" ++ show 
 newLoc :: Text -> TransT Location
 newLoc t = do
     locID <- nextLocID
-    return $ Location locID [] $ Just (t `Text.append` locID)
+    return $ Location ("loc" `Text.append` locID) [] $ Just (t `Text.append` locID)
 
 
 translateStatic :: Val -> TransT Text

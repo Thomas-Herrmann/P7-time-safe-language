@@ -44,7 +44,7 @@ data Location = Location {
                          , locLabels :: [Label]
                          , locName :: Maybe Text
                          }
-                         deriving (Eq, Ord)
+                         deriving (Eq, Ord, Show)
 
 data Label = Label Kind Text deriving (Eq, Ord, Show)
 

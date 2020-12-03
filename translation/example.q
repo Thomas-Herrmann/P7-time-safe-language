@@ -3,17 +3,27 @@
 /*
 
 */
-E<> pLig2
+A<> (pSen1 imply pLig1)
 
 /*
 
 */
-E<> pLig1
+A<> pLig1
+
+/*
+
+*/
+E<> (P_Temp0.Terminated)
 
 /*
 
 */
 A[] ((pLig1 imply (not pLig2)) and (pLig2 imply (not pLig1)))
+
+/*
+
+*/
+(P_Temp0.parInit5973 and pSen2 and pLig1)  --> pLig2
 
 /*
 
