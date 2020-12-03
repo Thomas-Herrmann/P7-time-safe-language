@@ -5,6 +5,7 @@ module Uppaal
     , System(..)
     , Template(..)
     , Location(..)
+    , LocationType(..)
     , Label(..)
     , Kind(..)
     , Transition(..)
@@ -39,10 +40,13 @@ data Template = Template {
                          }
                          deriving (Eq, Ord)
 
+data LocationType = NormalType | UrgentType | CommittedType deriving (Eq, Ord)
+
 data Location = Location { 
                            locId :: Text
                          , locLabels :: [Label]
                          , locName :: Maybe Text
+                         , locType :: LocationType
                          }
                          deriving (Eq, Ord, Show)
 
@@ -96,12 +100,17 @@ instance Renderable Template where
 
 instance Renderable Location where
     toXML loc = NodeElement $ Element "location" (Map.singleton "id" (locId loc)) $ 
-                nameList ++ Prelude.map toXML (locLabels loc)
+                nameList ++ Prelude.map toXML (locLabels loc) ++ typ
         where
             nameList =
                 case locName loc of
                     Just name -> [textNode "name" name]
                     Nothing -> []
+            typ = 
+                case locType loc of
+                    NormalType -> []
+                    UrgentType -> [NodeElement $ Element "urgent" Map.empty []]
+                    CommittedType -> [NodeElement $ Element "committed" Map.empty []]
         
 instance Renderable Label where
     toXML (Label kind content) = textNodeAttr "label" (Map.singleton "kind" (kindText kind)) content 
