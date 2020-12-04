@@ -127,13 +127,15 @@ addMinMaxEdge edges = do
 
 addClockDResetEdge :: [Transition] -> TransT [Transition]
 addClockDResetEdge edges = do
+    state <- State.get
+    let clk:_ = clockDStack state
     minMaxD <- State.get <&> minMaxD
     return $ case minMaxD of
         Nothing -> edges
-        Just _  -> Prelude.map addUpdate edges
+        Just _  -> Prelude.map (addUpdate clk) edges
     where
-        addUpdate (Transition to from labels) =
-            let (label', labels') = Prelude.foldr updateLabels (Label AssignmentKind "clkD := 0", []) labels 
+        addUpdate clk (Transition to from labels) =
+            let (label', labels') = Prelude.foldr updateLabels (Label AssignmentKind (clk `Text.append` " := 0"), []) labels 
             in Transition to from $ label' : labels' 
         
         updateLabels (Label AssignmentKind text) (Label AssignmentKind text', labels) = (Label AssignmentKind $ text `Text.append` ", " `Text.append` text', labels)
@@ -142,10 +144,12 @@ addClockDResetEdge edges = do
 
 addMinMaxLoc :: [Location] -> TransT [Location]
 addMinMaxLoc locs = do
+    state <- State.get
+    let clk:_ = clockDStack state
     minMaxD <- State.get <&> minMaxD
     return $ case minMaxD of
         Nothing        -> locs
-        Just (_, maxD) -> Prelude.map (addInvariant $ Label InvariantKind $ "clkD < " `Text.append` Text.pack (show maxD)) locs
+        Just (_, maxD) -> Prelude.map (addInvariant $ Label InvariantKind $ clk `Text.append` " < " `Text.append` Text.pack (show maxD)) locs
 
 
 
