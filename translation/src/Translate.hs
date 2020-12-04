@@ -17,9 +17,12 @@ import Uppaal
 
 data TransState = TransState {
                                shouldPrune :: Bool
+                             , minMaxD     :: Maybe (Integer, Integer)
+                             , clockDStack :: [Text]
                              , uniqueID    :: Integer
                              , tempID      :: Integer
                              , locID       :: Integer
+                             , clockID     :: Integer
                              , staticMap   :: Map Val Text
                              }
 
@@ -30,8 +33,8 @@ liftMaybe :: Maybe a -> MaybeT (StateT TransState IO) a
 liftMaybe = maybe mzero return
 
 
-translate :: Bool -> Exp -> [Name] -> [Name] -> [Name] -> [(Name, Name)] -> IO (Maybe System)
-translate pruneFlag e clockNames inPinNames outPinNames chanNames = do
+translate :: Bool -> Maybe (Integer, Integer) -> Exp -> [Name] -> [Name] -> [Name] -> [(Name, Name)] -> IO (Maybe System)
+translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
     maybe <- runStateT (runMaybeT (translateExp Map.empty Map.empty Map.empty [] e' >>= prune)) initState
     case maybe of
         (Nothing, _)                   -> return Nothing
@@ -40,7 +43,7 @@ translate pruneFlag e clockNames inPinNames outPinNames chanNames = do
             let temp'    = temp{  temLocations   = Location "Terminated"  [] (Just "Terminated") NormalType : temLocations temp,
                                   temTransitions = temTransitions temp ++ finTrans }
             return $ Just sys{ sysTemplates   = temp' : sysTemplates sys, 
-                               sysDecls       = sysDecls sys ++ stateDecls (staticMap state),
+                               sysDecls       = "clock clkD1;\n" : sysDecls sys ++ stateDecls (staticMap state),
                                sysSystemDecls = makeSysDecls (temp : sysTemplates sys) }
     where
         clocks n       = ClkVal n : clocks (n + 1)
@@ -54,7 +57,7 @@ translate pruneFlag e clockNames inPinNames outPinNames chanNames = do
         clockMap       = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
         inPinMap       = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
         outPinMap      = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
-        initState      = TransState pruneFlag 0 0 0 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
+        initState      = TransState pruneFlag minMaxD ["clkD1"] 0 0 0 2 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'             = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` chanSubst
 
         stateDecls :: Map Val Text -> [Declaration]
@@ -92,19 +95,75 @@ temp1 `joinTemp` temp2 = temp1{
 }
 
 
+putClkD :: TransT Text
+putClkD = do
+    state    <- State.get
+    let name = "clkD" `Text.append` Text.pack (show (clockID state))
+    put state{ clockDStack = name : clockDStack state, clockID = 1 + clockID state }
+    return $ "clock " `Text.append` name `Text.append` ";\n"
+
+popClkD :: TransT ()
+popClkD = do
+    state <- State.get
+    let _:clks = clockDStack state
+    put state{ clockDStack = clks }
+
+
+addMinMaxEdge :: [Transition] -> TransT [Transition]
+addMinMaxEdge edges = do
+    minMaxD <- State.get <&> minMaxD
+    clk:_   <- State.get <&> clockDStack
+    return $ case minMaxD of
+        Nothing        -> edges
+        Just (minD, _) -> Prelude.map (addUpdate clk . addGuard (Label GuardKind $ clk `Text.append` " >= " `Text.append` Text.pack (show minD))) edges
+    where
+        addUpdate clk (Transition to from labels) =
+            let (label', labels') = Prelude.foldr updateLabels (Label AssignmentKind (clk `Text.append` " := 0"), []) labels 
+            in Transition to from $ label' : labels' 
+        
+        updateLabels (Label AssignmentKind text) (Label AssignmentKind text', labels) = (Label AssignmentKind $ text `Text.append` ", " `Text.append` text', labels)
+        updateLabels label' (label, labels)                                           = (label, label' : labels)
+
+
+addClockDResetEdge :: [Transition] -> TransT [Transition]
+addClockDResetEdge edges = do
+    minMaxD <- State.get <&> minMaxD
+    return $ case minMaxD of
+        Nothing -> edges
+        Just _  -> Prelude.map addUpdate edges
+    where
+        addUpdate (Transition to from labels) =
+            let (label', labels') = Prelude.foldr updateLabels (Label AssignmentKind "clkD := 0", []) labels 
+            in Transition to from $ label' : labels' 
+        
+        updateLabels (Label AssignmentKind text) (Label AssignmentKind text', labels) = (Label AssignmentKind $ text `Text.append` ", " `Text.append` text', labels)
+        updateLabels label' (label, labels)                                           = (label, label' : labels)
+
+
+addMinMaxLoc :: [Location] -> TransT [Location]
+addMinMaxLoc locs = do
+    minMaxD <- State.get <&> minMaxD
+    return $ case minMaxD of
+        Nothing        -> locs
+        Just (_, maxD) -> Prelude.map (addInvariant $ Label InvariantKind $ "clkD < " `Text.append` Text.pack (show maxD)) locs
+
+
+
 prune :: (Template, System, Map Val (Set Text)) -> TransT (Template, System, Map Val (Set Text))
 prune (temp, sys, map) = do
     state <- State.get
+    let clk:_ = clockDStack state
     if shouldPrune state
-        then return (pruneTemplate temp, sys, map)
+        then return (pruneTemplate clk temp, sys, map)
         else return (temp, sys, map) -- Do no pruning
 
 
 nilSystem :: Text -> TransT (Template, System)
 nilSystem t = do
-    name  <- nextTempName
-    loc   <- newLoc t
-    return (Template name [loc] [] [] (locId loc) (locId loc), System [] [] [] [])
+    name <- nextTempName
+    loc  <- newLoc t
+    locs <- addMinMaxLoc [loc]
+    return (Template name locs [] [] (locId loc) (locId loc), System [] [] [] [])
 
 
 cttToInvariant :: Ctt -> Ctt
@@ -148,7 +207,7 @@ translateCtt _ = liftIO $ print "1" >> mzero
 
 translateExp :: Subst -> Map Name (Text, Text) -> Map Integer (Set Val) -> [([Label], Label)] -> Exp -> TransT (Template, System, Map Val (Set Text))
 translateExp _ _ _ _ (ValExp v) = do 
-    state <- State.get
+    state       <- State.get
     (temp, sys) <- nilSystem $ locNameFromVal (staticMap state) v
     return (temp, sys, Map.singleton v $ Set.singleton (temInit temp))
 
@@ -159,17 +218,17 @@ translateExp _ _ _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat x) (ValExp (
 
 translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = liftIO $ print "2" >>  mzero
                                                                         | otherwise                  = do
-    (temp1, sys1)       <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
-    (temp2, sys2, map1) <- translateExp recSubst recVars receivables inVars e2
-    locFinal            <- newLoc $ "recRefFinish_" `Text.append` Text.pack x `Text.append` "_"
+    (temp1, sys1)            <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
+    (temp2, sys2, map1)      <- translateExp recSubst recVars receivables inVars e2
+    locFinal                 <- newLoc $ "recRefFinish_" `Text.append` Text.pack x `Text.append` "_" 
+    mappedLocs               <- addMinMaxLoc [locFinal]
     let (recInit, recFinish) = recVars ! x
-    let recTrans  = [Transition (temInit temp1) recInit [], 
-                    Transition recFinish (locId locFinal) []]
-    let temp1'    = temp1{ temLocations   = locFinal : temLocations temp1,
-                           temTransitions = temTransitions temp1 ++ recTrans }
-    let tempRes   = temp2 `joinTemp` temp1'
-    let newTrans  = Map.foldr (\set l -> [Transition id (temInit temp1') [] | id <- Set.toList set] ++ l) [] map1
-    let tempRes'  = tempRes{ temTransitions = newTrans ++ temTransitions tempRes }
+    recTrans                 <- addMinMaxEdge [Transition (temInit temp1) recInit [], Transition recFinish (locId locFinal) []]
+    let temp1'               = temp1{ temLocations   = mappedLocs ++ temLocations temp1,
+                                      temTransitions = temTransitions temp1 ++ recTrans }
+    let tempRes              = temp2 `joinTemp` temp1'
+    newTrans                 <- addMinMaxEdge $ Map.foldr (\set l -> [Transition id (temInit temp1') [] | id <- Set.toList set] ++ l) [] map1
+    let tempRes'             = tempRes{ temTransitions = newTrans ++ temTransitions tempRes }
     prune (tempRes', sys2 `joinSys` sys1, Map.map (\_ -> Set.singleton (locId locFinal)) map1)
 
 translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
@@ -179,6 +238,7 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
     let vs2             = Map.keys map2
     branchLoc           <- newLoc "branch"
     bJoinLoc            <- newLoc "branchJoin"
+    mappedLocs          <- addMinMaxLoc [branchLoc, bJoinLoc]
     case () of
         _ | Map.size map1 > 1 || Map.size map2 > 1 -> do
             (intValMap1, var1)  <- setUpVarBranch map1
@@ -187,8 +247,8 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
             systemSets          <- Prelude.sequence [addGuardToSet (locId branchLoc) var1 var2 (intValMap1 ! v1) (intValMap2 ! v2) $ apply v1 v2 (locId branchLoc) (locId bJoinLoc) | v1 <- vs1, v2 <- vs2]
             let systems         = Prelude.foldr Set.union Set.empty systemSets
             let temp3           = temp1 `joinTemp` temp2
-            let newTrans        = makeAssignTrans map1 intValMap1 var1 (temInit temp2) ++ makeAssignTrans map2 intValMap2 var2 (locId branchLoc)
-            let temp3'          = temp3{ temLocations   = temLocations temp3 ++ [branchLoc, bJoinLoc], 
+            newTrans            <- addMinMaxEdge $ makeAssignTrans map1 intValMap1 var1 (temInit temp2) ++ makeAssignTrans map2 intValMap2 var2 (locId branchLoc)
+            let temp3'          = temp3{ temLocations   = temLocations temp3 ++ mappedLocs, 
                                          temTransitions = temTransitions temp3 ++ newTrans,
                                          temDecls       = varDecl : temDecls temp3 }
             prune $ Prelude.foldr joinTuples (temp3', sys1 `joinSys` sys2, Map.empty) systems
@@ -196,8 +256,8 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
             systemSets          <- Prelude.sequence [addBranchToSet (locId branchLoc) $ apply v1 v2 (locId branchLoc) (locId bJoinLoc) | v1 <- vs1, v2 <- vs2]
             let systems         = Prelude.foldr Set.union Set.empty systemSets
             let temp3           = temp1 `joinTemp` temp2
-            let newTrans        = makePlainTrans (Map.elems map1) (temInit temp2) ++ makePlainTrans (Map.elems map2) (locId branchLoc)
-            let temp3'          = temp3{ temLocations   = temLocations temp3 ++ [branchLoc, bJoinLoc], 
+            newTrans            <- addMinMaxEdge $ makePlainTrans (Map.elems map1) (temInit temp2) ++ makePlainTrans (Map.elems map2) (locId branchLoc)
+            let temp3'          = temp3{ temLocations   = temLocations temp3 ++ mappedLocs, 
                                          temTransitions = temTransitions temp3 ++ newTrans }
             prune $ Prelude.foldr joinTuples (temp3', sys1 `joinSys` sys2, Map.empty) systems
     
@@ -211,12 +271,21 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
         makeGuard var1 var2 id1 id2 = Label GuardKind $ var1 `Text.append` " == " `Text.append` Text.pack (show id1) `Text.append` " and " `Text.append`
                                                         var2 `Text.append` " == " `Text.append` Text.pack (show id2)
 
-        addBranchToSet from monad = Set.map (\(temp, sys, map) -> (temp{ temTransitions = Transition from (temInit temp) [] : temTransitions temp }, sys, map)) <$> monad
+        addBranchToSet :: Text -> TransT (Set (Template, System, Map Val (Set Text))) -> TransT (Set (Template, System, Map Val (Set Text)))
+        addBranchToSet from monad = do
+            set    <- monad
+            list   <- mapM (\(temp, sys, map) -> do 
+                        branches <- addMinMaxEdge [Transition from (temInit temp) []]
+                        return (temp{ temTransitions = branches ++ temTransitions temp }, sys, map)) $ Set.toList set
+            return $ Set.fromList list
 
         addGuardToSet from var1 var2 id1 id2 monad = do
-            set                   <- monad
-            let guard             = makeGuard var1 var2 id1 id2
-            return $ Set.map (\(temp, sys, map) -> (temp{ temTransitions = Transition from (temInit temp) [guard] : temTransitions temp }, sys, map)) set
+            set       <- monad
+            let guard = makeGuard var1 var2 id1 id2
+            list      <- mapM (\(temp, sys, map) -> do 
+                            branches <- addMinMaxEdge [Transition from (temInit temp) [guard]]
+                            return (temp{ temTransitions = branches ++ temTransitions temp }, sys, map)) $ Set.toList set
+            return $ Set.fromList list
 
         setUpVarBranch :: Map Val (Set Text) -> TransT (Map Val Integer, Text)
         setUpVarBranch map = do
@@ -248,9 +317,14 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
             es               <- matchBody body v2
             let recVars'     = Map.insert x (recInit, recFinal) recVars
             let recSubst'    = Map.insert x fun recSubst
-            let newTrans map = Map.foldr (\set l -> [Transition id recFinal [] | id <- Set.toList set] ++ l) [] map
+            let newTrans map = Map.foldr (\set monad -> do
+                    l        <- monad 
+                    branches <- addMinMaxEdge [Transition id recFinal [] | id <- Set.toList set]
+                    return $ branches ++ l) (return []) map
             systems          <- Prelude.mapM (translateExp recSubst' recVars' receivables inVars) (Set.toList es)
-            return $ Set.map (\(temp, sys, map) -> (temp{ temTransitions = newTrans map ++ temTransitions temp }, sys, map)) $ Set.fromList systems
+            Prelude.mapM (\(temp, sys, map) -> do 
+                    branches <- newTrans map
+                    return (temp{ temTransitions = branches ++ temTransitions temp }, sys, map)) systems <&> Set.fromList
 
         apply v1@(TermVal name vs) v2 _ _ = do 
             state  <- State.get
@@ -260,10 +334,12 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
         apply (ConVal ResetCon) v2 _ _ = do
             (temp, sys) <- nilSystem "appReset"
             finalLoc    <- newLoc "appDone"
+            mappedLocs  <- addMinMaxLoc [finalLoc]
             t           <- translateStatic v2
             let label   = Label AssignmentKind $ t `Text.append` " = 0"
-            return $ Set.singleton (temp{ temLocations   = finalLoc : temLocations temp,
-                                          temTransitions = Transition (temInit temp) (locId finalLoc) [label] : temTransitions temp }, 
+            newTrans    <- addMinMaxEdge [Transition (temInit temp) (locId finalLoc) [label]]
+            return $ Set.singleton (temp{ temLocations   = mappedLocs ++ temLocations temp,
+                                          temTransitions = newTrans ++ temTransitions temp }, 
                                     sys, Map.singleton v2 (Set.singleton (locId finalLoc)))
 
 translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
@@ -272,28 +348,32 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     [Label _ t]   <- translateCtt $ cttToInvariant g
     locInit       <- newLoc "invarInit"
     locFail       <- newLoc "invarFail"
+    mappedLocs    <- addMinMaxLoc [locInit, locFail]
     (temp1, sys1, map1) <- translateExp recSubst recVars receivables ((failLabels, Label InvariantKind t) : inVars) e1 >>= prune
     let temp1'    = temp1{ temLocations   = Prelude.map (addInvariant (Label InvariantKind t)) $ temLocations temp1,
                            temTransitions = Prelude.map (addGuard guardLabel) $ temTransitions temp1 }
-    let failTrans = [Transition (locId loc) (locId locFail) [failLabel] | loc <- locInit : temLocations temp1, failLabel <- failLabels]
+    failTrans     <- addClockDResetEdge [Transition (locId loc) (locId locFail) [failLabel] | loc <- locInit : temLocations temp1, failLabel <- failLabels]
     (map1', succTrans, locs) <- foldM (makePair guardLabel map1) (Map.empty, [], []) $ Map.keys map1
-    let connTrans = Transition (locId locInit) (temInit temp1') []
-    let temp2     = temp1'{ temTransitions = temTransitions temp1' ++ failTrans ++ succTrans ++ [connTrans],
-                            temLocations   = temLocations temp1' ++ [locInit, locFail] ++ locs,
+    connTrans     <- addMinMaxEdge [Transition (locId locInit) (temInit temp1') []]
+    let temp2     = temp1'{ temTransitions = temTransitions temp1' ++ failTrans ++ succTrans ++ connTrans,
+                            temLocations   = temLocations temp1' ++ mappedLocs ++ locs,
                             temInit        = locId locInit }
     sigmas        <- liftMaybe $ snapshots receivables subst e1
     let e2'       = substitute e2 subst
     systems       <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e2' sigma) | sigma <- Set.toList sigmas]
-    let systems'  = Prelude.map (\(temp, sys, map) -> (temp{ temTransitions = Transition (locId locFail) (temInit temp) [] : temTransitions temp }, sys, map)) systems
+    systems'      <- Prelude.mapM (\(temp, sys, map) -> do 
+            link <- addMinMaxEdge [Transition (locId locFail) (temInit temp) []]
+            return (temp{ temTransitions = link ++ temTransitions temp }, sys, map)) systems
     prune $ Prelude.foldr joinTuples (temp2, sys1, map1') systems' 
     where
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, Map.unionWith Set.union m2 m1)
 
         makePair guard prevMap (map, ts, ls) v = do
-            state   <- State.get
-            loc     <- newLoc $ "invarSucc_" `Text.append` locNameFromVal (staticMap state) v
-            let ts' = [Transition id (locId loc) [guard] | id <- Set.toList $ prevMap ! v]
-            return (Map.unionWith Set.union (Map.singleton v (Set.singleton (locId loc))) map, ts' ++ ts, loc:ls)
+            state     <- State.get
+            loc       <- newLoc $ "invarSucc_" `Text.append` locNameFromVal (staticMap state) v
+            mappedLoc <- addMinMaxLoc [loc]
+            ts'       <- addMinMaxEdge [Transition id (locId loc) [guard] | id <- Set.toList $ prevMap ! v]
+            return (Map.unionWith Set.union (Map.singleton v (Set.singleton (locId loc))) map, ts' ++ ts, mappedLoc ++ ls)
 
 translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
     (temp1, sys1, map1) <- translateExp recSubst recVars receivables inVars e1
@@ -307,7 +387,7 @@ translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
         addTransitions map v monad | v `Map.notMember` map = liftIO $ print "3" >>  mzero
                                    | otherwise             = do
             (temp, sys, map') <- monad
-            let newTrans      = [Transition id (temInit temp) [] | id <- Set.toList $ map ! v]
+            newTrans          <- addMinMaxEdge [Transition id (temInit temp) [] | id <- Set.toList $ map ! v]
             return (temp{ temTransitions = newTrans ++ temTransitions temp }, sys, map')
 
 translateExp recSubst recVars receivables inVars (SyncExp body) = do
@@ -324,47 +404,61 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
             return $ systems ++ systems'
 
         translateSyncPair from q@(ReceiveSync (Right (ReceiveVal id)) x) e | id `Map.member` receivables = do
-            systems     <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
-            label       <- translateSync q
-            let addGuard (temp, sys, map) = (temp{ temTransitions = Transition from (temInit temp) [label] : temTransitions temp }, sys, map)
-            return $ Prelude.map addGuard systems
+            systems                       <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
+            label                         <- translateSync q
+            let addGuard (temp, sys, map) = do 
+                    link <- addClockDResetEdge [Transition from (temInit temp) [label]]
+                    return (temp{ temTransitions = link ++ temTransitions temp }, sys, map)
+            Prelude.mapM addGuard systems
 
         translateSyncPair _ (ReceiveSync (Right (ReceiveVal _)) _) _ = return []
 
         translateSyncPair from q e = do
             (temp, sys, map) <- translateExp recSubst recVars receivables inVars e
             label            <- translateSync q
-            return [(temp{ temTransitions = Transition from (temInit temp) [label] : temTransitions temp }, sys, map)]
+            link             <- addClockDResetEdge [Transition from (temInit temp) [label]]
+            return [(temp{ temTransitions = link ++ temTransitions temp }, sys, map)]
 
 translateExp recSubst recVars receivables inVars (GuardExp e g) = do
     guard            <- translateCtt g
     [Label _ invar]  <- translateCtt $ cttToInvariant g
     (temp, sys, map) <- translateExp recSubst recVars receivables inVars e
     initLoc          <- newLoc "guardInit"
-    interLoc         <- newLoc "guardSatisfied" <&> \loc -> loc{ locLabels = [Label InvariantKind invar] }
-    let newTrans     = [Transition (locId initLoc) (locId interLoc) guard, Transition (locId interLoc) (temInit temp) guard]
-    prune (temp{ temLocations   = [initLoc, interLoc] ++ temLocations temp, 
-                 temTransitions = newTrans ++ temTransitions temp, 
+    mappedLoc        <- addMinMaxLoc [initLoc]
+    clockResetTrans  <- do
+            minMaxD <- State.get <&> minMaxD
+            case minMaxD of
+                Nothing -> return []
+                _       -> addMinMaxEdge [Transition (locId initLoc) (locId initLoc) []]
+    interLoc         <- newLoc "guardSatisfied" <&> \loc -> loc{ locLabels = [Label InvariantKind invar], locType = UrgentType }
+    let initTrans    = Transition (locId initLoc) (locId interLoc) guard
+    guardBreakTrans  <- addClockDResetEdge [Transition (locId interLoc) (temInit temp) guard]
+    prune (temp{ temLocations   = interLoc : (mappedLoc ++ temLocations temp), 
+                 temTransitions = clockResetTrans ++ [initTrans] ++ guardBreakTrans ++ temTransitions temp, 
                  temInit        = locId initLoc }, sys, map) -- we assume that our guards do not have LOR, although syntactically possible
 
 translateExp _ _ receivables inVars (ParExp e1 e2) = do
     (sendables1, sendables2) <- liftMaybe $ multiPassSends e1 e2 2
-    (temp1, sys1, map1)      <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1 >>= prune
-    (temp2, sys2, map2)      <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2 >>= prune
-    (intValMap1, var1)       <- setUpVarBranch map1
-    (intValMap2, var2)       <- setUpVarBranch map2
-    (tempMain, sys3)         <- nilSystem "parInit"
-    let sys4                 = sys1 `joinSys` sys2 `joinSys` sys3
     startID                  <- nextUniqueID
     stopID1                  <- nextUniqueID
     stopID2                  <- nextUniqueID
+    clockDecl1               <- putClkD 
+    (temp1, sys1, map1)      <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables2) `Map.difference` sendables1) [] e1 >>= prune
+    (intValMap1, var1)       <- setUpVarBranch map1
     temp1'                   <- addGuards temp1 intValMap1 map1 var1 startID stopID1 inVars
+    popClkD
+    clockDecl2               <- putClkD
+    (temp2, sys2, map2)      <- translateExp Map.empty Map.empty ((receivables `Map.union` sendables1) `Map.difference` sendables2) [] e2 >>= prune
+    (intValMap2, var2)       <- setUpVarBranch map2
     temp2'                   <- addGuards temp2 intValMap2 map2 var2 startID stopID2 inVars
+    popClkD
+    (tempMain, sys3)         <- nilSystem "parInit"
+    let sys4                 = sys1 `joinSys` sys2 `joinSys` sys3
     (tempMain', mapRes)      <- addGuardsMain tempMain intValMap1 var1 intValMap2 var2 startID stopID1 stopID2
     let varDecl              = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
     let varDecl'             = "int " `Text.append` var1 `Text.append` ", " `Text.append` var2 `Text.append` ";\n" `Text.append` varDecl
     prune (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
-                            sysDecls = varDecl' : sysDecls sys4 }, mapRes)
+                            sysDecls = clockDecl1 : clockDecl2 : varDecl' : sysDecls sys4 }, mapRes)
     where
         varText s id kind = Text.pack $ s ++ show id ++ kind
 
@@ -377,38 +471,40 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
 
         addGuards temp intMap locMap var startID stopID inVars = do
             initLoc        <- newLoc "init"
+            mappedLoc      <- addMinMaxLoc [initLoc]
             let vs         = Map.keys locMap
             let startLabel = Label SyncKind $ varText "start" startID "?"
             let endLabel   = Label SyncKind $ varText "stop" stopID "!"
             let foldf v l  = [Transition id (locId initLoc) [endLabel, Label AssignmentKind $ var `Text.append` " := " `Text.append` Text.pack (show (intMap ! v))] | id <- Set.toList $ locMap ! v] ++ l
-            let newTrans   = Transition (locId initLoc) (temInit temp) [startLabel] : Prelude.foldr foldf [] vs
-            let temp'      = checkInvariant temp (locId initLoc) inVars
+            newTrans       <- addMinMaxEdge $ Transition (locId initLoc) (temInit temp) [startLabel] : Prelude.foldr foldf [] vs
+            temp'          <- checkInvariant temp (locId initLoc) inVars
             let temp''     = Prelude.foldr (\(_, inVar) temp -> temp{ temLocations = Prelude.map (addInvariant inVar) $ temLocations temp }) temp' inVars
             return $ temp''{ temInit        = locId initLoc,
-                             temLocations   = initLoc : temLocations temp'', 
+                             temLocations   = mappedLoc ++ temLocations temp'', 
                              temTransitions = temTransitions temp'' ++ newTrans }
 
-        checkInvariant temp to inVars = 
-            let failTrans = Prelude.concat [[Transition from to [failLabel] | failLabel <- failLabels, from <- Prelude.map locId $ temLocations temp] | (failLabels, _) <- inVars]
-            in  temp{ temTransitions = temTransitions temp ++ failTrans }
+        checkInvariant temp to inVars = do
+            failTrans <- addClockDResetEdge $ Prelude.concat [[Transition from to [failLabel] | failLabel <- failLabels, from <- Prelude.map locId $ temLocations temp] | (failLabels, _) <- inVars]
+            return temp{ temTransitions = temTransitions temp ++ failTrans }
 
         addGuardsMain temp intValMap1 var1 intValMap2 var2 startID stopID1 stopID2 = do
-            initLoc        <- newLoc "parInit"
-            stopLoc1       <- newLoc "parStopA"
-            stopLoc2       <- newLoc "parStopB"
-            let startLabel = Label SyncKind $ varText "start" startID "!"
-            let endLabel1  = Label SyncKind $ varText "stop" stopID1 "?"
-            let endLabel2  = Label SyncKind $ varText "stop" stopID2 "?"
-            let vs1        = Map.keys intValMap1
-            let vs2        = Map.keys intValMap2
-            branchPairs    <- Prelude.sequence [makePair (locId stopLoc2) v1 v2 | v1 <- vs1, v2 <- vs2]
-            let newLocs    = Prelude.map (snd . fst) branchPairs
+            initLoc                <- newLoc "parInit"
+            stopLoc1               <- newLoc "parStopA"
+            stopLoc2               <- newLoc "parStopB"
+            let startLabel         = Label SyncKind $ varText "start" startID "!"
+            let endLabel1          = Label SyncKind $ varText "stop" stopID1 "?"
+            let endLabel2          = Label SyncKind $ varText "stop" stopID2 "?"
+            let vs1                = Map.keys intValMap1
+            let vs2                = Map.keys intValMap2
+            branchPairs            <- Prelude.sequence [makePair (locId stopLoc2) v1 v2 | v1 <- vs1, v2 <- vs2]
+            let newLocs            = Prelude.map (snd . fst) branchPairs
+            mappedLocs             <- addMinMaxLoc $ initLoc : stopLoc2 : newLocs
             let (locMap, newTrans) = Prelude.foldr (\((v, loc), t) (map, ts) -> (Map.insert v (Set.singleton (locId loc)) map, t:ts)) (Map.empty, []) branchPairs
-            let newTrans'  = [Transition (locId initLoc) (temInit temp) [startLabel], 
-                              Transition (temInit temp) (locId stopLoc1) [endLabel1],
-                              Transition (locId stopLoc1) (locId stopLoc2) [endLabel2]] ++ newTrans
+            finTrans               <- addClockDResetEdge $ Transition (locId initLoc) (temInit temp) [startLabel] : [Transition (locId stopLoc1) (locId stopLoc2) [endLabel2]]
+            mappedTrans            <- addMinMaxEdge newTrans
+            let newTrans'          = Transition (temInit temp) (locId stopLoc1) [endLabel1] : mappedTrans ++ finTrans
             return (temp{ temInit        = locId initLoc,
-                          temLocations   = temLocations temp ++ [initLoc, stopLoc1, stopLoc2] ++ newLocs,
+                          temLocations   = stopLoc1 : temLocations temp ++ mappedLocs,
                           temTransitions = temTransitions temp ++ newTrans' }, locMap)
             where
                 makePair from v1 v2 = do

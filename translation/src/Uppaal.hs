@@ -12,7 +12,6 @@ module Uppaal
     , Query(..)
     , systemToXML
     , pruneTemplate
-    , pruneSystem
     ) where
 
 import Text.XML
@@ -40,7 +39,7 @@ data Template = Template {
                          }
                          deriving (Eq, Ord)
 
-data LocationType = NormalType | UrgentType | CommittedType deriving (Eq, Ord)
+data LocationType = NormalType | UrgentType | CommittedType deriving (Eq, Ord, Show)
 
 data Location = Location { 
                            locId :: Text
@@ -129,11 +128,9 @@ systemToXML :: System -> Document
 systemToXML sys = case toXML sys of
     NodeElement el -> Document (Prologue [] Nothing []) el []
 
-pruneSystem :: System -> System
-pruneSystem sys = sys { sysTemplates = Prelude.map pruneTemplate (sysTemplates sys)}
 
-pruneTemplate :: Template -> Template
-pruneTemplate temp = let (newLocs, newTrans) = prune (temLocations temp, temTransitions temp) (temLocations temp)
+pruneTemplate :: Text -> Template -> Template
+pruneTemplate clock temp = let (newLocs, newTrans) = prune (temLocations temp, temTransitions temp) (temLocations temp)
                      in temp { temLocations = newLocs, temTransitions = newTrans}
     where
         initLoc = temInit temp
