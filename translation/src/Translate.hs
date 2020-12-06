@@ -15,37 +15,51 @@ import Ast
 import Partition
 import Uppaal
 
+-- Definition of the type saved as state in the Translation monad
 data TransState = TransState {
-                               shouldPrune :: Bool
-                             , minMaxD     :: Maybe (Integer, Integer)
-                             , clockDStack :: [Text]
-                             , uniqueID    :: Integer
-                             , tempID      :: Integer
-                             , locID       :: Integer
-                             , clockID     :: Integer
-                             , staticMap   :: Map Val Text
+                               shouldPrune :: Bool                     -- Specifies whether the compiler should prune locations
+                             , minMaxD     :: Maybe (Integer, Integer) -- Optional min max boundaries to delays in the model
+                             , clockDStack :: [Text]                   -- 'stack' of clocks used for 'controlled' delays
+                             , uniqueID    :: Integer                  -- The next unique integer ID for arbitrary use
+                             , tempID      :: Integer                  -- The next unique integer ID for templates
+                             , locID       :: Integer                  -- The next unique integer ID for locations
+                             , clockID     :: Integer                  -- The next unique integer ID for clocks used for delays
+                             , staticMap   :: Map Val Text             -- A map from statically defined values to their UPPAAL representations
                              }
 
+-- Definition of the translation monad.
+-- Provides a simple way to fail a computation using MaybeT,
+-- a notion of state through StateT and debugging through IO.
 type TransT a = MaybeT (StateT TransState IO) a
 
 
-liftMaybe :: Maybe a -> MaybeT (StateT TransState IO) a
+-- Simple function used to lift the Maybe monad up to the translation monad
+liftMaybe :: Maybe a -> TransT a
 liftMaybe = maybe mzero return
 
 
+-- Implementation of the translation function.
+-- Through parameters we specify:
+--     1. Whether to prune the generated model
+--     2. Optional min max boundaries to delays
+--     3. The expression to be translated
+--     4. Lists of names for the variables that initially store clocks, in-pins, out-pins and channels (as pairs).
 translate :: Bool -> Maybe (Integer, Integer) -> Exp -> [Name] -> [Name] -> [Name] -> [(Name, Name)] -> IO (Maybe System)
 translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
     maybe <- runStateT (runMaybeT (translateExp Map.empty Map.empty Map.empty [] e' >>= prune)) initState
     case maybe of
-        (Nothing, _)                   -> return Nothing
-        (Just (temp, sys, map), state) -> do
-            let finTrans = Transition "Terminated" "Terminated" [] : Map.foldr (\set l -> [Transition id "Terminated" [] | id <- Set.toList set] ++ l) [] map
+        (Nothing, _)                   -> return Nothing -- We could not translate the program, return nothing
+        (Just (temp, sys, map), state) -> do             -- We suceeded in translating the program, add a final location 'terminated', and make the necessary declarations
+            let finTrans = case minMaxD of
+                    Nothing        -> Map.foldr (\set l -> [Transition id "Terminated" [] | id <- Set.toList set] ++ l) [] map
+                    Just (minD, _) -> Map.foldr (\set l -> [Transition id "Terminated" (termDLabels minD) | id <- Set.toList set] ++ l) [] map
             let temp'    = temp{  temLocations   = Location "Terminated"  [] (Just "Terminated") NormalType : temLocations temp,
-                                  temTransitions = temTransitions temp ++ finTrans }
+                                  temTransitions = Transition "Terminated" "Terminated" [] : temTransitions temp ++ finTrans }
             return $ Just sys{ sysTemplates   = temp' : sysTemplates sys, 
                                sysDecls       = "clock clkD1;\n" : sysDecls sys ++ stateDecls (staticMap state),
                                sysSystemDecls = makeSysDecls (temp : sysTemplates sys) }
     where
+        -- Make the initial state; Make all the necessary clocks, pins and channels
         clocks n       = ClkVal n : clocks (n + 1)
         inPins n       = InPinVal n : inPins (n + 1)
         outPins n      = OutPinVal n : outPins (n + 1)
@@ -60,6 +74,10 @@ translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
         initState      = TransState pruneFlag minMaxD ["clkD1"] 0 0 0 2 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'             = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` chanSubst
 
+        -- Makes labels for edges that constraint delays
+        termDLabels min = [Label GuardKind ("clkD1 >= " `Text.append` Text.pack (show min)), Label AssignmentKind "clkD1 := 0"]
+
+        -- Functions used to make declarations of clocks etc.
         stateDecls :: Map Val Text -> [Declaration]
         stateDecls map = Map.foldrWithKey makeDecl [] map
 
@@ -78,6 +96,7 @@ translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
             in tempDecls ++ [sysDecl]
 
 
+-- Joins two systems, by appending their lists of declarations, templates etc.
 joinSys :: System -> System -> System
 sys1 `joinSys` sys2 = sys1{ 
     sysDecls       = sysDecls sys1 ++ sysDecls sys2,
@@ -87,6 +106,8 @@ sys1 `joinSys` sys2 = sys1{
  }
 
 
+-- Joins two templates, by appending their lists of locations, transitions etc.
+-- The first specified template keeps its initial location.
 joinTemp :: Template -> Template -> Template
 temp1 `joinTemp` temp2 = temp1{
     temLocations   = temLocations temp1 ++ temLocations temp2,
@@ -95,6 +116,8 @@ temp1 `joinTemp` temp2 = temp1{
 }
 
 
+-- Generates a new clock for specifying constraints to delays,
+-- and puts it on the stack of such clocks in the translation state.
 putClkD :: TransT Text
 putClkD = do
     state    <- State.get
@@ -102,6 +125,8 @@ putClkD = do
     put state{ clockDStack = name : clockDStack state, clockID = 1 + clockID state }
     return $ "clock " `Text.append` name `Text.append` ";\n"
 
+
+-- Pops the top-most clock from the stack of clocks used for specifying constraints to delays in the translation state
 popClkD :: TransT ()
 popClkD = do
     state <- State.get
@@ -109,6 +134,9 @@ popClkD = do
     put state{ clockDStack = clks }
 
 
+-- Maps the specified list of transitions,
+-- such that each transition has two new labels; 1 for guarding the minimum delay; 1 for resetting the 'delay' clock.
+-- In case any transition already has guards or assignments, we append to the existing labels.
 addMinMaxEdge :: [Transition] -> TransT [Transition]
 addMinMaxEdge edges = do
     minMaxD <- State.get <&> minMaxD
@@ -125,6 +153,9 @@ addMinMaxEdge edges = do
         updateLabels label' (label, labels)                                           = (label, label' : labels)
 
 
+-- Same effect as 'addMinMaxEdge', except we only add a label to reset the 'delay' clock.
+-- We use this function on transitions with synchronizations,
+-- as we cannot constraint the delays here (they depend on other synchronization expressions).
 addClockDResetEdge :: [Transition] -> TransT [Transition]
 addClockDResetEdge edges = do
     state <- State.get
@@ -142,6 +173,9 @@ addClockDResetEdge edges = do
         updateLabels label' (label, labels)                                           = (label, label' : labels)
 
 
+-- Maps the specified list of locations,
+-- such that each location is given a new invariant that provides an upper bound to delays in each location.
+-- In case any location already has an invariant, we 'and' the existing and new invariants.
 addMinMaxLoc :: [Location] -> TransT [Location]
 addMinMaxLoc locs = do
     state <- State.get
@@ -152,7 +186,8 @@ addMinMaxLoc locs = do
         Just (_, maxD) -> Prelude.map (addInvariant $ Label InvariantKind $ clk `Text.append` " < " `Text.append` Text.pack (show maxD)) locs
 
 
-
+-- Prunes locations in the template of the specified triple,
+-- if 'shouldPrune' is true in the translation state.
 prune :: (Template, System, Map Val (Set Text)) -> TransT (Template, System, Map Val (Set Text))
 prune (temp, sys, map) = do
     state <- State.get
@@ -162,6 +197,11 @@ prune (temp, sys, map) = do
         else return (temp, sys, map) -- Do no pruning
 
 
+-- Returns a pair of a new template and system,
+-- such that:
+--     1. The template has a single location with a name based on the specified Text
+--     2. The system is 'empty'
+--     3. We constraint delays in the template, if such constraints are specified in the translation state
 nilSystem :: Text -> TransT (Template, System)
 nilSystem t = do
     name <- nextTempName
@@ -170,6 +210,21 @@ nilSystem t = do
     return (Template name locs [] [] (locId loc) (locId loc), System [] [] [] [])
 
 
+-- Returns a pair of a new template and system,
+-- such that:
+--     1. The template has a single location with a name based on the specified Text
+--     2. The system is 'empty'
+--     3. We do not constraint delays in the template, regardless of the translation state
+nilSystemNoD :: Text -> TransT (Template, System)
+nilSystemNoD t = do
+    name <- nextTempName
+    loc  <- newLoc t
+    return (Template name [loc] [] [] (locId loc) (locId loc), System [] [] [] [])
+
+
+-- Transforms the specified temporal constraint,
+-- such that it is slightly more 'forgiving' for use in UPPAAL invariants.
+-- Refer to the specification for a definition of the transformation.
 cttToInvariant :: Ctt -> Ctt
 cttToInvariant (LandCtt g1 g2)   = LandCtt (cttToInvariant g1) (cttToInvariant g2)
 cttToInvariant (ClockLeqCtt x n) = ClockLeqCtt x $ n + 1
@@ -179,6 +234,10 @@ cttToInvariant (ClockGCtt x n)   = ClockGeqCtt x n
 cttToInvariant (LorCtt _ _)      = error "Logical OR may only be used on fail edges!"
 
 
+-- Translates the specified temporal constraint to a list of labels.
+-- Note that negation may introduce logical ORs, which are not support by UPPAAL.
+-- In such cases, we much specify multiple transitions, thereby simulating the logical OR.
+-- Therefore, we return a list of Labels, although it has cardinality 1 in most cases.
 translateCtt :: Ctt -> TransT [Label]
 translateCtt (LandCtt g1 g2) = do
     lbs1 <- translateCtt g1
@@ -206,9 +265,21 @@ translateCtt (ClockGCtt (Right v) n) =
     translateStatic v >>= 
         (\t -> return [Label GuardKind (t `Text.append` Text.pack (" > " ++ show n))])
 
-translateCtt _ = liftIO $ print "1" >> mzero
+translateCtt _ = mzero
 
 
+-- Implementation of the translation rules from expressions to UPPAAL models.
+-- We specify:
+--     1. A substitution, mapping references to recursive functions to their corresponding function bodies
+--     2. A map from references to recursive functions to pairs of corresponding location identifiers for 'recInit' and 'recFinish' locations
+--     3. A map from channel identifiers to sets of possible values to be received on the corresponding channels
+--     4. A list of pairs of a list of 'fail labels' and a single 'invariant label' used for adding 'fail transitions' to new templates created from parallel compositions. 
+--        We require a list of fail cases to simulate logical ORs from negation of our temporal constraints.
+--     5. The expression to be translated
+-- We return a triple consisting of:
+--     1. The 'main' template, corresponding to the template of the expression's root node
+--     2. A system containing all other templates created from parallel compositions, as well as global declarations
+--     3. A map from values to sets of locations, marking the end locations of the constructed model, while mapping them to values
 translateExp :: Subst -> Map Name (Text, Text) -> Map Integer (Set Val) -> [([Label], Label)] -> Exp -> TransT (Template, System, Map Val (Set Text))
 translateExp _ _ _ _ (ValExp v) = do 
     state       <- State.get
@@ -220,7 +291,7 @@ translateExp _ _ _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat x) (ValExp (
     (temp, sys) <- nilSystem "fixAbs"
     return (temp, sys, Map.singleton (RecMatchVal x body) $ Set.singleton (temInit temp))
 
-translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = liftIO $ print "2" >>  mzero
+translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = mzero
                                                                         | otherwise                  = do
     (temp1, sys1)            <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
     (temp2, sys2, map1)      <- translateExp recSubst recVars receivables inVars e2
@@ -388,14 +459,14 @@ translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, m2 `Map.union` m1)
 
         addTransitions :: Map Val (Set Text) -> Val -> TransT (Template, System, Map Val (Set Text)) -> TransT (Template, System, Map Val (Set Text))
-        addTransitions map v monad | v `Map.notMember` map = liftIO $ print "3" >>  mzero
+        addTransitions map v monad | v `Map.notMember` map = mzero
                                    | otherwise             = do
             (temp, sys, map') <- monad
             newTrans          <- addMinMaxEdge [Transition id (temInit temp) [] | id <- Set.toList $ map ! v]
             return (temp{ temTransitions = newTrans ++ temTransitions temp }, sys, map')
 
 translateExp recSubst recVars receivables inVars (SyncExp body) = do
-    (temp, sys) <- nilSystem "syncInit"
+    (temp, sys) <- nilSystemNoD "syncInit"
     systems     <- translateBody (temInit temp) body
     prune $ Prelude.foldr joinTuples (temp, sys, Map.empty) systems
     where
@@ -475,7 +546,6 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
 
         addGuards temp intMap locMap var startID stopID inVars = do
             initLoc        <- newLoc "init"
-            mappedLoc      <- addMinMaxLoc [initLoc]
             let vs         = Map.keys locMap
             let startLabel = Label SyncKind $ varText "start" startID "?"
             let endLabel   = Label SyncKind $ varText "stop" stopID "!"
@@ -484,7 +554,7 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
             temp'          <- checkInvariant temp (locId initLoc) inVars
             let temp''     = Prelude.foldr (\(_, inVar) temp -> temp{ temLocations = Prelude.map (addInvariant inVar) $ temLocations temp }) temp' inVars
             return $ temp''{ temInit        = locId initLoc,
-                             temLocations   = mappedLoc ++ temLocations temp'', 
+                             temLocations   = initLoc : temLocations temp'', 
                              temTransitions = temTransitions temp'' ++ newTrans }
 
         checkInvariant temp to inVars = do
@@ -492,7 +562,7 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
             return temp{ temTransitions = temTransitions temp ++ failTrans }
 
         addGuardsMain temp intValMap1 var1 intValMap2 var2 startID stopID1 stopID2 = do
-            initLoc                <- newLoc "parInit"
+            initLoc                <- newLoc "parStart"
             stopLoc1               <- newLoc "parStopA"
             stopLoc2               <- newLoc "parStopB"
             let startLabel         = Label SyncKind $ varText "start" startID "!"
@@ -502,13 +572,13 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
             let vs2                = Map.keys intValMap2
             branchPairs            <- Prelude.sequence [makePair (locId stopLoc2) v1 v2 | v1 <- vs1, v2 <- vs2]
             let newLocs            = Prelude.map (snd . fst) branchPairs
-            mappedLocs             <- addMinMaxLoc $ initLoc : stopLoc2 : newLocs
+            mappedLocs             <- addMinMaxLoc $ stopLoc2 : newLocs
             let (locMap, newTrans) = Prelude.foldr (\((v, loc), t) (map, ts) -> (Map.insert v (Set.singleton (locId loc)) map, t:ts)) (Map.empty, []) branchPairs
-            finTrans               <- addClockDResetEdge $ Transition (locId initLoc) (temInit temp) [startLabel] : [Transition (locId stopLoc1) (locId stopLoc2) [endLabel2]]
+            finTrans               <- addClockDResetEdge [Transition (locId stopLoc1) (locId stopLoc2) [endLabel2]]
             mappedTrans            <- addMinMaxEdge newTrans
-            let newTrans'          = Transition (temInit temp) (locId stopLoc1) [endLabel1] : mappedTrans ++ finTrans
-            return (temp{ temInit        = locId initLoc,
-                          temLocations   = stopLoc1 : temLocations temp ++ mappedLocs,
+            let newTrans'          = Transition (temInit temp) (locId initLoc) [startLabel] : Transition (locId initLoc) (locId stopLoc1) [endLabel1] : mappedTrans ++ finTrans
+            return (temp{ temInit        = temInit temp,
+                          temLocations   = initLoc : stopLoc1 : temLocations temp ++ mappedLocs,
                           temTransitions = temTransitions temp ++ newTrans' }, locMap)
             where
                 makePair from v1 v2 = do
@@ -520,9 +590,12 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
                     return ((TermVal "Pair" [v1, v2], loc), trans)
                                                   
 
-translateExp _ _ _ _ e = liftIO $ print e >>  mzero
+translateExp _ _ _ _ _ = mzero
 
 
+-- Transforms the specified location,
+-- such that it has an invariant corresponding to the specified label.
+-- In case the location already has an invariant, we 'and' the existing and new invariants.
 addInvariant :: Label -> Location -> Location
 addInvariant invar loc =
     let (label, labels) = Prelude.foldr extendInvar (invar, []) $ locLabels loc
@@ -532,6 +605,9 @@ addInvariant invar loc =
         extendInvar label' (label, labels)                       = (label, label' : labels) 
 
 
+-- Transforms the specified transition,
+-- such that is has a guard corresponding to the specified label.
+-- In case the transition already has a guard, we 'and' the existing and new guards.
 addGuard :: Label -> Transition -> Transition
 addGuard guard (Transition from to existing) =
     let (label, labels) = Prelude.foldr extendGuard (guard, []) existing
@@ -541,6 +617,8 @@ addGuard guard (Transition from to existing) =
         extendGuard label' (label, labels)                   = (label, label' : labels)
 
 
+-- Returns a name representing the specified value,
+-- given the specified map from values to their UPPAAL representations.
 locNameFromVal :: Map Val Text -> Val -> Text
 locNameFromVal valMap v | v `Map.member` valMap = (valMap ! v) `Text.append` "_"
 locNameFromVal _ (ConVal ResetCon)              = "resetCon"
@@ -553,12 +631,18 @@ locNameFromVal _ (InPinVal id)                  = Text.pack $ "inPin_" ++ show i
 locNameFromVal _ (OutPinVal id)                 = Text.pack $ "outPin_" ++ show id
 
 
+-- Returns a fresh location with a name based on the specified Text
 newLoc :: Text -> TransT Location
 newLoc t = do
     locID <- nextLocID
     return $ Location locID [] (Just (t `Text.append` locID)) NormalType
 
 
+-- Returns the UPPAAL representation of the specified value.
+-- If the value is a channel end, for which the channel has not yet been declared,
+-- we add a global declaration for it.
+-- Note that this could have been done statically, 
+-- but this is more convenient if we wish to add dynamic channels in the future.
 translateStatic :: Val -> TransT Text
 translateStatic v = do
     state <- State.get
@@ -567,7 +651,7 @@ translateStatic v = do
             case v of
                 SendVal id    -> updateChannel id
                 ReceiveVal id -> updateChannel id
-                _             -> liftIO $ print "5" >>  mzero
+                _             -> mzero
         Just t  -> return t
     where
         updateChannel :: Integer -> TransT Text
@@ -579,6 +663,8 @@ translateStatic v = do
             return $ Text.pack ("ch" ++ show id)
 
 
+-- Translates a synchronization from our language to its UPPAAL equivalent,
+-- represented by a label.
 translateSync ::  Sync -> TransT Label
 translateSync (ReceiveSync (Right ch@(ReceiveVal _)) _) = do 
     channelName <- translateStatic ch
@@ -596,15 +682,19 @@ translateSync (SetSync (Right pn@(OutPinVal _)) b) = do
     pinName <- translateStatic pn
     return $ Label AssignmentKind $ pinName `Text.append` Text.pack (" := " ++ if b then "1" else "0")
 
-translateSync _ = liftIO $ print "6" >>  mzero
+translateSync _ = mzero
 
 
+-- Returns the next unique integer ID, 
+-- and increments the uniqueID counter in the translation state.
 nextUniqueID :: TransT Integer
 nextUniqueID = State.get >>= 
     (\state -> State.put state{ uniqueID = uniqueID state + 1 } >> 
     return (uniqueID state))
 
 
+-- Returns the next unique template name,
+-- and increments the uniqueID counter for templates in the translation state.
 nextTempName :: TransT Text
 nextTempName = do
     state <- State.get
@@ -612,6 +702,8 @@ nextTempName = do
     return $ Text.pack ("Temp" ++ show (tempID state))
 
 
+-- Returns the next unique location ID,
+-- and increments the uniqueID counter for locations in the translation state.
 nextLocID :: TransT Text
 nextLocID = do
     state <- State.get
