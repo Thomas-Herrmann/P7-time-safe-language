@@ -18,6 +18,7 @@ import Text.XML
 import Data.Map as Map
 import Data.Text as Text
 import Data.List as List
+import Data.Maybe
 
 type Declaration = Text
 
@@ -128,10 +129,11 @@ systemToXML :: System -> Document
 systemToXML sys = case toXML sys of
     NodeElement el -> Document (Prologue [] Nothing []) el []
 
-
+-- Continously goes over every location in the template, trying to remove locations each pass.
+-- Once no more locations are removed in a pass, no more passes are done.  
 pruneTemplate :: Text -> Template -> Template
-pruneTemplate clock temp = let (newLocs, newTrans) = prune (temLocations temp, temTransitions temp) (temLocations temp)
-                     in temp { temLocations = newLocs, temTransitions = newTrans}
+pruneTemplate clkD temp = let (newLocs, newTrans) = prune (temLocations temp, temTransitions temp) (temLocations temp)
+                           in temp { temLocations = newLocs, temTransitions = newTrans}
     where
         initLoc = temInit temp
 
@@ -144,13 +146,33 @@ pruneTemplate clock temp = let (newLocs, newTrans) = prune (temLocations temp, t
         prunePass :: ([Location], [Transition]) -> [Location] -> ([Location], [Transition])
         prunePass (locs, trans) [] = (locs, trans)
         prunePass (locs, trans) (l:ls) =
-            case () of 
-               _ | lId /= initLoc && -- Don't remove inital locations
+            case () of
+                   -- Prune unconnected locations 
+               _ | Prelude.null incomingTransL && Prelude.null outgoingTransL ->
+                    prunePass (List.delete l locs, trans) ls
+                   -- Prune simple locations with a single outgoing and a single incoming transition. Create a new transition connected the two now unconnected locations
+                 | lId /= initLoc && -- Don't remove inital locations
                    Prelude.length incomingTransL == 1 && Prelude.length outgoingTransL == 1 && -- Only remove locations with 1 incoming and 1 outgoing transition
                    Prelude.null (locLabels l) && Prelude.null (traLabels iTran) && Prelude.null (traLabels oTran) ->
-                    prunePass (List.delete l locs, newTran:List.delete iTran (List.delete oTran trans)) ls
-                 | Prelude.null incomingTransL && Prelude.null outgoingTransL ->
-                    prunePass (List.delete l locs, trans) ls
+                    let newTran = Transition {traSource = traSource iTran, traTarget = traTarget oTran, traLabels = []}
+                    in prunePass (List.delete l locs, newTran:List.delete iTran (List.delete oTran trans)) ls
+                   -- Prune locations with a single outgoing and a single outgoing transition, taking into account updates to clkD
+                 | Prelude.length incomingTransL == 1 && Prelude.length outgoingTransL == 1 && -- Only remove locations with 1 incoming and 1 outgoing transition
+                   Prelude.length (locLabels l) == 1 && Prelude.length (traLabels iTran) == 2 && Prelude.length (traLabels oTran) == 2 &&
+                   isJust (traGetClkDGuard iTran) && isJust (traGetClkDUpdate iTran) && -- Ensure only transitions with the correct labels are pruned
+                   isJust (traGetClkDGuard oTran) && isJust (traGetClkDUpdate oTran) &&
+                   locType l == NormalType && isJust (locGetClkDInvariant l) && isJust (fst (findLocsFromTran iTran)) -> 
+                    let (Just l2, _) = findLocsFromTran iTran
+                        invariantTime1 = labelExractTime $ fromJust $ locGetClkDInvariant l -- Find Y in invariant of form "clkDX < Y" of first location
+                        invariantTime2 = labelExractTime $ fromJust $ locGetClkDInvariant l2 -- Find Y in invariant of form "clkDX < Y" of second location
+                        transitionTime1 = labelExractTime $ fromJust $ traGetClkDGuard oTran -- Find Y in guard of form "clkX >= Y" of first transition
+                        transitionTime2 = labelExractTime $ fromJust $ traGetClkDGuard iTran -- Find Y in guard of form "clkX >= Y" of second transition
+                        newInvariant = Label InvariantKind $ clkDInvariantPrefix `Text.append` Text.pack (show $ invariantTime1 + invariantTime2) -- Construct new invariant
+                        newGuard = Label GuardKind $ clkDGuardPrefix `Text.append` Text.pack (show $ transitionTime1 + transitionTime2) -- Construct new guard
+                        newUpdate = Label AssignmentKind clkDUpdateText -- Construct update label
+                        newLoc = Location {locId = locId l2, locLabels = [newInvariant], locName = locName l2, locType = locType l2} -- Construct updated version of first location
+                        newTran = Transition {traSource = locId newLoc, traTarget = traTarget oTran, traLabels = [newGuard, newUpdate]} -- Construct new transition
+                    in prunePass (newLoc:List.delete l2 (List.delete l locs), newTran:List.delete iTran (List.delete oTran trans)) (List.delete l2 ls)
                  | otherwise -> 
                     prunePass (locs, trans) ls
             where
@@ -161,4 +183,23 @@ pruneTemplate clock temp = let (newLocs, newTrans) = prune (temLocations temp, t
 
                 iTran = List.head incomingTransL
                 oTran = List.head outgoingTransL
-                newTran = Transition {traSource = traSource iTran, traTarget = traTarget oTran, traLabels = []}
+
+                -- Tries to find the corresponding locations to an edge
+                findLocsFromTran tran = (List.find (\loc -> locId loc == traSource tran) locs, 
+                                         List.find (\loc -> locId loc == traTarget tran) locs)
+        
+        clkDGuardPrefix = clkD `Text.append` " >= "
+        clkDUpdateText = clkD `Text.append` " := 0"
+        clkDInvariantPrefix = clkD `Text.append` " < "
+        
+        traGetClkDGuard t = List.find (\(Label kind content) -> kind == GuardKind && Text.isPrefixOf clkDGuardPrefix content) (traLabels t)
+        traGetClkDUpdate t = List.find (\(Label kind content) -> kind == AssignmentKind && clkDUpdateText == content) (traLabels t)
+        locGetClkDInvariant l = List.find (\(Label kind content) -> kind == InvariantKind && Text.isPrefixOf clkDInvariantPrefix content) (locLabels l)
+
+        -- Extracts the time of a label based on its type and prefix
+        labelExractTime :: Label -> Int
+        labelExractTime (Label kind content) = 
+            let maybeText = case kind of
+                                GuardKind -> Text.stripPrefix clkDGuardPrefix content
+                                InvariantKind -> Text.stripPrefix clkDInvariantPrefix content
+            in read (Text.unpack (fromJust maybeText))
