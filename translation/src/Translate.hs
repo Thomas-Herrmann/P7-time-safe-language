@@ -24,6 +24,7 @@ data TransState = TransState {
                              , tempID      :: Integer                  -- The next unique integer ID for templates
                              , locID       :: Integer                  -- The next unique integer ID for locations
                              , clockID     :: Integer                  -- The next unique integer ID for clocks used for delays
+                             , channelVars :: Map Val Text             -- A map from channel ends to variables used to control delays in synchronizations
                              , staticMap   :: Map Val Text             -- A map from statically defined values to their UPPAAL representations
                              }
 
@@ -56,7 +57,7 @@ translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
             let temp'    = temp{  temLocations   = Location "Terminated"  [] (Just "Terminated") NormalType : temLocations temp,
                                   temTransitions = Transition "Terminated" "Terminated" [] : temTransitions temp ++ finTrans }
             return $ Just sys{ sysTemplates   = temp' : sysTemplates sys, 
-                               sysDecls       = "clock clkD1;\n" : sysDecls sys ++ stateDecls (staticMap state),
+                               sysDecls       = "clock clkD1;\n" : sysDecls sys ++ stateDecls (staticMap state) ++ syncVarDecls (channelVars state),
                                sysSystemDecls = makeSysDecls (temp : sysTemplates sys) }
     where
         -- Make the initial state; Make all the necessary clocks, pins and channels
@@ -70,8 +71,8 @@ translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
         (chanSubst, _) = Prelude.foldr (\(sn, rn) (map, (s, r):chs) -> (map `Map.union` Map.fromList [(sn, s), (rn, r)], chs)) (Map.empty, channels 0) chanNames
         clockMap       = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
         inPinMap       = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
-        outPinMap      = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames
-        initState      = TransState pruneFlag minMaxD ["clkD1"] 0 0 0 2 $ clockMap `Map.union` inPinMap `Map.union` outPinMap
+        outPinMap      = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames 
+        initState      = TransState pruneFlag minMaxD ["clkD1"] 0 0 0 2 Map.empty $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'             = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` chanSubst
 
         -- Makes labels for edges that constraint delays
@@ -80,12 +81,17 @@ translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
         -- Functions used to make declarations of clocks etc.
         stateDecls :: Map Val Text -> [Declaration]
         stateDecls map = Map.foldrWithKey makeDecl [] map
+            where
+                makeDecl (ClkVal _) t decls    = ("clock " `Text.append` t `Text.append` ";\n") : decls
+                makeDecl (SendVal _) t decls   = ("chan " `Text.append` t `Text.append` ";\n") : decls
+                makeDecl (InPinVal _) t decls  = ("bool " `Text.append` t `Text.append` " = 0;\n") : decls
+                makeDecl (OutPinVal _) t decls = ("bool " `Text.append` t `Text.append` " = 0;\n") : decls
+                makeDecl _ _ decls             = decls
 
-        makeDecl (ClkVal _) t decls    = (Text.pack "clock " `Text.append` t `Text.append` Text.pack ";\n") : decls
-        makeDecl (SendVal _) t decls   = (Text.pack "chan " `Text.append` t `Text.append` Text.pack ";\n") : decls
-        makeDecl (InPinVal _) t decls  = (Text.pack "bool " `Text.append` t `Text.append` Text.pack " = 0;\n") : decls
-        makeDecl (OutPinVal _) t decls = (Text.pack "bool " `Text.append` t `Text.append` Text.pack " = 0;\n") : decls
-        makeDecl _ _ decls             = decls
+        syncVarDecls :: Map Val Text -> [Declaration]
+        syncVarDecls map = Map.foldrWithKey makeDecl [] map
+            where
+                makeDecl _ t decls    = ("bool " `Text.append` t `Text.append` " = 0;\n") : decls
 
         makeSysDecls :: [Template] -> [Declaration]
         makeSysDecls temps =
@@ -114,6 +120,14 @@ temp1 `joinTemp` temp2 = temp1{
     temTransitions = temTransitions temp1 ++ temTransitions temp2,
     temDecls       = temDecls temp1 ++ temDecls temp2
 }
+
+
+joinLabel :: Label -> Label -> [Label]
+joinLabel (Label GuardKind t1) (Label GuardKind t2)           = [Label GuardKind $ t1 `Text.append` "and " `Text.append` t2]
+joinLabel (Label AssignmentKind t1) (Label AssignmentKind t2) = [Label AssignmentKind $ t1 `Text.append` ", " `Text.append` t2]
+joinLabel (Label InvariantKind t1) (Label InvariantKind t2)   = [Label InvariantKind $ t1 `Text.append` "and " `Text.append` t2]
+joinLabel (Label SyncKind _) (Label SyncKind _)               = error "not defined"
+joinLabel l1 l2                                               = [l1, l2]
 
 
 -- Generates a new clock for specifying constraints to delays,
@@ -466,32 +480,111 @@ translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
             return (temp{ temTransitions = newTrans ++ temTransitions temp }, sys, map')
 
 translateExp recSubst recVars receivables inVars (SyncExp body) = do
-    (temp, sys) <- nilSystemNoD "syncInit"
-    systems     <- translateBody (temInit temp) body
-    prune $ Prelude.foldr joinTuples (temp, sys, Map.empty) systems
+    (temp, sys)     <- nilSystem "syncInit"
+    (sVars, mRVars) <- findChannelVars body
+    pVars           <- findPinVars body
+    waitLoc         <- newLoc "syncWait"
+    varSetTrans     <- addMinMaxEdge $ 
+        if Prelude.null sVars
+            then [Transition (temInit temp) (locId waitLoc) []] 
+            else [Transition (temInit temp) (locId waitLoc) [Label AssignmentKind $ Text.intercalate ", " $ Prelude.map (`Text.append` " := 1") sVars]]
+    systems         <- translateBody (locId waitLoc) sVars body
+    minMaxD         <- State.get <&> minMaxD
+    resetTrans      <- case (minMaxD, mRVars) of
+            (Nothing, _)    -> return []
+            (_, Nothing)    -> return []
+            (_, Just rVars) -> do 
+                let guard1 = Label GuardKind $ Text.intercalate " and " $ Prelude.map (`Text.append` " == 0") rVars
+                let guard2 = Label GuardKind $ Text.intercalate " and " pVars
+                let guards = 
+                        case () of
+                            _ | Prelude.null rVars && Prelude.null pVars -> []
+                              | Prelude.null rVars                       -> [guard2]
+                              | Prelude.null pVars                       -> [guard1]
+                              | otherwise                                -> guard1 `joinLabel` guard2
+                addMinMaxEdge [Transition (locId waitLoc) (locId waitLoc) guards]
+    prune $ Prelude.foldr joinTuples (temp{ temLocations   = waitLoc : temLocations temp, 
+                                            temTransitions = varSetTrans ++ resetTrans ++ temTransitions temp}, sys, Map.empty) systems
     where
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, m2 `Map.union` m1)
 
-        translateBody from (SingleSync q e)    = translateSyncPair from q e
-        translateBody from (MultiSync q e rem) = do 
-            systems  <- translateSyncPair from q e
-            systems' <- translateBody from rem
+        findPinVars (SingleSync q _)    = findSyncPinVars q 
+        findPinVars (MultiSync q _ rem) = do
+            vars  <- findSyncPinVars q
+            vars' <- findPinVars rem
+            return $ vars ++ vars'
+
+        findSyncPinVars :: Sync -> TransT [Text]
+        findSyncPinVars (GetSync (Right v@(InPinVal _)) b) = do
+            staticMap <- State.get <&> staticMap
+            case Map.lookup v staticMap of
+                Nothing -> mzero
+                Just t  -> do 
+                    let bText = if not b then "1" else "0"
+                    return [t `Text.append` " == " `Text.append` bText]
+
+        findSyncPinVars _ = return []
+        
+        findChannelVars :: SyncBody -> TransT ([Text], Maybe [Text])
+        findChannelVars (SingleSync q _) = do
+            maybeEither <- findSyncVar q
+            return $ case maybeEither of
+                Nothing           -> ([], Nothing)
+                Just (Left sVar)  -> (sVar, Just [])
+                Just (Right rVar) -> ([], Just rVar)
+
+        findChannelVars (MultiSync q _ rem) = do
+            maybeEither         <- findSyncVar q
+            (sVars, maybeRVars) <- findChannelVars rem
+            return $ case (maybeEither, maybeRVars) of
+                (Nothing, _)                    -> (sVars, Nothing)
+                (Just (Left sVar), Nothing)     -> (sVar ++ sVars, Nothing)
+                (Just (Left sVar), Just rVars)  -> (sVar ++ sVars, Just rVars)
+                (Just (Right rVar), Just rVars) -> (sVars, Just (rVar ++ rVars))
+
+        findSyncVar :: Sync -> TransT (Maybe (Either [Text] [Text]))
+        findSyncVar (ReceiveSync (Right v@(ReceiveVal _)) _) = do
+            translateStatic v -- ensure a variable exists for the channel end
+            state <- State.get <&> channelVars 
+            return $ Just (Right [state ! v]) 
+
+        findSyncVar (SendSync (Right v@(SendVal _)) _ _) = do
+            translateStatic v -- ensure a variable exists for the channel end
+            state <- State.get <&> channelVars
+            return $ Just (Left [state ! v])
+
+        findSyncVar (GetSync (Right (InPinVal _)) _)  = return $ Just (Right [])
+        findSyncVar (SetSync (Right (OutPinVal _)) _) = return Nothing
+        findSyncVar _                                 = mzero
+
+        translateBody from sVars (SingleSync q e)        = translateSyncPair from sVars q e
+        translateBody from sVars (MultiSync q e rem) = do 
+            systems  <- translateSyncPair from sVars q e
+            systems' <- translateBody from sVars rem
             return $ systems ++ systems'
 
-        translateSyncPair from q@(ReceiveSync (Right (ReceiveVal id)) x) e | id `Map.member` receivables = do
+        translateSyncPair from sVars q@(ReceiveSync (Right (ReceiveVal id)) x) e | id `Map.member` receivables = do
             systems                       <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
             label                         <- translateSync q
-            let addGuard (temp, sys, map) = do 
-                    link <- addClockDResetEdge [Transition from (temInit temp) [label]]
+            let labels =
+                    if Prelude.null sVars
+                        then [label]
+                        else joinLabel label $ Label AssignmentKind $ Text.intercalate ", " $ Prelude.map (`Text.append` " := 0") sVars
+            let addGuard (temp, sys, map) = do
+                    link <- addClockDResetEdge [Transition from (temInit temp) labels]
                     return (temp{ temTransitions = link ++ temTransitions temp }, sys, map)
             Prelude.mapM addGuard systems
 
-        translateSyncPair _ (ReceiveSync (Right (ReceiveVal _)) _) _ = return []
+        translateSyncPair _ _ (ReceiveSync (Right (ReceiveVal _)) _) _ = return []
 
-        translateSyncPair from q e = do
+        translateSyncPair from sVars q e = do
             (temp, sys, map) <- translateExp recSubst recVars receivables inVars e
             label            <- translateSync q
-            link             <- addClockDResetEdge [Transition from (temInit temp) [label]]
+            let labels =
+                    if Prelude.null sVars
+                        then [label]
+                        else joinLabel label $ Label AssignmentKind $ Text.intercalate ", " $ Prelude.map (`Text.append` " := 0") sVars
+            link             <- addClockDResetEdge [Transition from (temInit temp) labels]
             return [(temp{ temTransitions = link ++ temTransitions temp }, sys, map)]
 
 translateExp recSubst recVars receivables inVars (GuardExp e g) = do
@@ -504,8 +597,10 @@ translateExp recSubst recVars receivables inVars (GuardExp e g) = do
             minMaxD <- State.get <&> minMaxD
             case minMaxD of
                 Nothing -> return []
-                _       -> addMinMaxEdge [Transition (locId initLoc) (locId initLoc) []]
-    interLoc         <- newLoc "guardSatisfied" <&> \loc -> loc{ locLabels = [Label InvariantKind invar], locType = UrgentType }
+                _       -> do 
+                    negGuardLabels <- translateCtt $ negateCtt g
+                    addMinMaxEdge [Transition (locId initLoc) (locId initLoc) [label] | label <- negGuardLabels]
+    interLoc         <- newLoc "guardSatisfied" <&> \loc -> loc{ locLabels = [Label InvariantKind invar] }
     let initTrans    = Transition (locId initLoc) (locId interLoc) guard
     guardBreakTrans  <- addClockDResetEdge [Transition (locId interLoc) (temInit temp) guard]
     prune (temp{ temLocations   = interLoc : (mappedLoc ++ temLocations temp), 
@@ -640,7 +735,7 @@ newLoc t = do
 
 -- Returns the UPPAAL representation of the specified value.
 -- If the value is a channel end, for which the channel has not yet been declared,
--- we add a global declaration for it.
+-- we update the staticMap.
 -- Note that this could have been done statically, 
 -- but this is more convenient if we wish to add dynamic channels in the future.
 translateStatic :: Val -> TransT Text
@@ -657,9 +752,14 @@ translateStatic v = do
         updateChannel :: Integer -> TransT Text
         updateChannel id = do 
             state <- State.get
-            let newBindings  = Map.fromList [(SendVal id, Text.pack ("ch" ++ show id)), (ReceiveVal id, Text.pack ("ch" ++ show id))]
-            let newStaticMap = staticMap state `Map.union` newBindings
-            State.put state{ staticMap = newStaticMap }
+            let newBindings    = Map.fromList [(SendVal id, Text.pack ("ch" ++ show id)), (ReceiveVal id, Text.pack ("ch" ++ show id))]
+            let newStaticMap   = staticMap state `Map.union` newBindings
+            let newVars        = 
+                    case minMaxD state of 
+                        Nothing -> Map.empty
+                        Just _  -> Map.fromList [(SendVal id, Text.pack ("readySend" ++ show id)), (ReceiveVal id, Text.pack ("readyReceive" ++ show id))]
+            let newChannelVars = channelVars state `Map.union` newVars
+            State.put state{ staticMap = newStaticMap, channelVars = newChannelVars }
             return $ Text.pack ("ch" ++ show id)
 
 
