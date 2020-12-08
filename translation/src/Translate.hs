@@ -224,18 +224,6 @@ nilSystem t = do
     return (Template name locs [] [] (locId loc) (locId loc), System [] [] [] [])
 
 
--- Returns a pair of a new template and system,
--- such that:
---     1. The template has a single location with a name based on the specified Text
---     2. The system is 'empty'
---     3. We do not constraint delays in the template, regardless of the translation state
-nilSystemNoD :: Text -> TransT (Template, System)
-nilSystemNoD t = do
-    name <- nextTempName
-    loc  <- newLoc t
-    return (Template name [loc] [] [] (locId loc) (locId loc), System [] [] [] [])
-
-
 -- Transforms the specified temporal constraint,
 -- such that it is slightly more 'forgiving' for use in UPPAAL invariants.
 -- Refer to the specification for a definition of the transformation.
@@ -627,8 +615,9 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
     (tempMain', mapRes)      <- addGuardsMain tempMain intValMap1 var1 intValMap2 var2 startID stopID1 stopID2
     let varDecl              = Text.pack $ "broadcast chan " ++ "start" ++ show startID ++ ";\n chan stop" ++ show stopID1 ++ ", stop" ++ show stopID2 ++ ";\n"
     let varDecl'             = "int " `Text.append` var1 `Text.append` ", " `Text.append` var2 `Text.append` ";\n" `Text.append` varDecl
+    let varDecl''            = Text.pack ("bool readyStart" ++ show startID ++ " := 0; bool readyStop" ++ show stopID1 ++ " := 0; bool readyStop" ++ show stopID2 ++ ";\n") `Text.append` varDecl'
     prune (tempMain', sys4{ sysTemplates = sysTemplates sys4 ++ [temp1', temp2'], 
-                            sysDecls = clockDecl1 : clockDecl2 : varDecl' : sysDecls sys4 }, mapRes)
+                            sysDecls = clockDecl1 : clockDecl2 : varDecl'' : sysDecls sys4 }, mapRes)
     where
         varText s id kind = Text.pack $ s ++ show id ++ kind
 
@@ -640,42 +629,75 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
             return (intValMap, varName)
 
         addGuards temp intMap locMap var startID stopID inVars = do
-            initLoc        <- newLoc "init"
-            let vs         = Map.keys locMap
-            let startLabel = Label SyncKind $ varText "start" startID "?"
-            let endLabel   = Label SyncKind $ varText "stop" stopID "!"
-            let foldf v l  = [Transition id (locId initLoc) [endLabel, Label AssignmentKind $ var `Text.append` " := " `Text.append` Text.pack (show (intMap ! v))] | id <- Set.toList $ locMap ! v] ++ l
-            newTrans       <- addMinMaxEdge $ Transition (locId initLoc) (temInit temp) [startLabel] : Prelude.foldr foldf [] vs
-            temp'          <- checkInvariant temp (locId initLoc) inVars
-            let temp''     = Prelude.foldr (\(_, inVar) temp -> temp{ temLocations = Prelude.map (addInvariant inVar) $ temLocations temp }) temp' inVars
+            hasMinMaxD      <- getHasMinMaxD
+            let forceDLabel = [Label AssignmentKind $ Text.pack $ "readyStop" ++ show stopID ++ " := 1" | hasMinMaxD ]
+            initLoc         <- newLoc "init"
+            varLoc          <- newLoc "varSet"
+            mappedLoc       <- addMinMaxLoc [initLoc, varLoc]
+            waitStartTrans  <- makeDelayTrans hasMinMaxD (locId initLoc)
+            let vs          = Map.keys locMap
+            let startLabel  = Label SyncKind $ varText "start" startID "?"
+            let endLabel    = Label SyncKind $ varText "stop" stopID "!"
+            let varLabel v  = Label AssignmentKind $ var `Text.append` Text.pack (" := " ++ show (intMap ! v) ++ if hasMinMaxD then ", readyStop" ++ show stopID ++ " := 0" else "")
+            let foldf v l   = Prelude.concat [[Transition id (locId varLoc) forceDLabel, Transition (locId varLoc) (locId initLoc) [endLabel, varLabel v]] | id <- Set.toList $ locMap ! v] ++ l
+            newTrans        <- addClockDResetEdge $ Transition (locId initLoc) (temInit temp) [startLabel] : Prelude.foldr foldf [] vs
+            temp'           <- checkInvariant temp (locId initLoc) inVars
+            let temp''      = Prelude.foldr (\(_, inVar) temp -> temp{ temLocations = Prelude.map (addInvariant inVar) $ temLocations temp }) temp' inVars
             return $ temp''{ temInit        = locId initLoc,
-                             temLocations   = initLoc : temLocations temp'', 
-                             temTransitions = temTransitions temp'' ++ newTrans }
+                             temLocations   = mappedLoc ++ temLocations temp'', 
+                             temTransitions = temTransitions temp'' ++ newTrans ++ waitStartTrans }
+            where
+                makeDelayTrans b id = 
+                    if b 
+                        then addMinMaxEdge [Transition id id [Label GuardKind $ Text.pack $ "readyStart" ++ show startID ++ " == 0"]]
+                        else return []
 
         checkInvariant temp to inVars = do
             failTrans <- addClockDResetEdge $ Prelude.concat [[Transition from to [failLabel] | failLabel <- failLabels, from <- Prelude.map locId $ temLocations temp] | (failLabels, _) <- inVars]
             return temp{ temTransitions = temTransitions temp ++ failTrans }
 
+        getHasMinMaxD = do
+            minMaxD        <- State.get <&> minMaxD
+            return $ case minMaxD of
+                Nothing -> False
+                Just _  -> True
+
         addGuardsMain temp intValMap1 var1 intValMap2 var2 startID stopID1 stopID2 = do
+            hasMinMaxD             <- getHasMinMaxD
             initLoc                <- newLoc "parStart"
+            waitLoc                <- newLoc "parVarSet"
             stopLoc1               <- newLoc "parStopA"
             stopLoc2               <- newLoc "parStopB"
+            let updateLabels       = [Label AssignmentKind $ Text.pack $ "readyStart" ++ show startID ++ " := 1" | hasMinMaxD]
             let startLabel         = Label SyncKind $ varText "start" startID "!"
             let endLabel1          = Label SyncKind $ varText "stop" stopID1 "?"
             let endLabel2          = Label SyncKind $ varText "stop" stopID2 "?"
+            let varLabel = Label AssignmentKind $ Text.pack $ "readyStart" ++ show startID ++ " := 0"
             let vs1                = Map.keys intValMap1
             let vs2                = Map.keys intValMap2
             branchPairs            <- Prelude.sequence [makePair (locId stopLoc2) v1 v2 | v1 <- vs1, v2 <- vs2]
             let newLocs            = Prelude.map (snd . fst) branchPairs
-            mappedLocs             <- addMinMaxLoc $ stopLoc2 : newLocs
-            let (locMap, newTrans) = Prelude.foldr (\((v, loc), t) (map, ts) -> (Map.insert v (Set.singleton (locId loc)) map, t:ts)) (Map.empty, []) branchPairs
-            finTrans               <- addClockDResetEdge [Transition (locId stopLoc1) (locId stopLoc2) [endLabel2]]
-            mappedTrans            <- addMinMaxEdge newTrans
-            let newTrans'          = Transition (temInit temp) (locId initLoc) [startLabel] : Transition (locId initLoc) (locId stopLoc1) [endLabel1] : mappedTrans ++ finTrans
+            mappedLocs             <- addMinMaxLoc $ waitLoc : initLoc : stopLoc1 : stopLoc2 : newLocs
+            delayTrans             <- makeDelayTrans hasMinMaxD (locId waitLoc) (locId stopLoc1)
+            let (locMap, newTrans) = Prelude.foldr (\((v, loc), t) (map, ts) -> (Map.insert v (Set.singleton (locId loc)) map, t : ts)) (Map.empty, []) branchPairs
+            mappedTrans            <- addClockDResetEdge newTrans
+            let newTrans'          = Transition (temInit temp) (locId initLoc) updateLabels   : 
+                                     Transition (locId initLoc) (locId waitLoc) [startLabel]  : 
+                                     Transition (locId waitLoc) (locId stopLoc1) [endLabel1, varLabel]  :
+                                     Transition (locId waitLoc) (locId stopLoc1) [endLabel2, varLabel]  :
+                                     Transition (locId stopLoc1) (locId stopLoc2) [endLabel1] :
+                                     Transition (locId stopLoc1) (locId stopLoc2) [endLabel2] : mappedTrans
             return (temp{ temInit        = temInit temp,
-                          temLocations   = initLoc : stopLoc1 : temLocations temp ++ mappedLocs,
-                          temTransitions = temTransitions temp ++ newTrans' }, locMap)
+                          temLocations   = temLocations temp ++ mappedLocs,
+                          temTransitions = temTransitions temp ++ newTrans' ++ delayTrans }, locMap)
             where
+                makeDelayTrans b id1 id2 = 
+                    if b 
+                        then addMinMaxEdge [Transition id1 id1 [Label GuardKind $ Text.pack $ "readyStop" ++ show stopID1 ++ " == 0 and readyStop" ++ show stopID2 ++ " == 0"], 
+                                                 Transition id2 id2 [Label GuardKind $ Text.pack $ "readyStop" ++ show stopID1 ++ " == 0 and readyStop" ++ show stopID2 ++ " == 1"],
+                                                 Transition id2 id2 [Label GuardKind $ Text.pack $ "readyStop" ++ show stopID2 ++ " == 0 and readyStop" ++ show stopID1 ++ " == 1"]]
+                        else return []
+
                 makePair from v1 v2 = do
                     state <- State.get
                     loc <- newLoc $ "parFin_" `Text.append` locNameFromVal (staticMap state) v1 `Text.append` "_" `Text.append` locNameFromVal (staticMap state) v2
