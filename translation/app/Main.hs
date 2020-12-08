@@ -75,7 +75,7 @@ parTest = ParExp (ValExp $ ConVal ResetCon) (ValExp $ ConVal ResetCon)
 
 main :: IO ()
 main = do
-   maybe <- translate False (Just (20, 50)) Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.channelNames
+   maybe <- translate True (Just (20, 50)) Example.mainFun Example.clockNames Example.inPinNames Example.outPinNames Example.channelNames
    case maybe of
       Nothing  -> putStrLn "failure"
       Just sys -> Text.XML.writeFile def "example.xml" $ systemToXML sys
