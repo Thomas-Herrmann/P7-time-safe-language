@@ -190,7 +190,7 @@ pruneTemplate clkD temp = let (newLocs, newTrans) = prune (temLocations temp, te
         
         clkDGuardPrefix = clkD `Text.append` " >= "
         clkDUpdateText = clkD `Text.append` " := 0"
-        clkDInvariantPrefix = clkD `Text.append` " < "
+        clkDInvariantPrefix = clkD `Text.append` " <= "
         
         traGetClkDGuard t = List.find (\(Label kind content) -> kind == GuardKind && Text.isPrefixOf clkDGuardPrefix content) (traLabels t)
         traGetClkDUpdate t = List.find (\(Label kind content) -> kind == AssignmentKind && clkDUpdateText == content) (traLabels t)
