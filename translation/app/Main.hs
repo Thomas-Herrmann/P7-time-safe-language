@@ -21,8 +21,8 @@ main = do
     delays <- 
         if forceDelays
         then do 
-            minD <- putStr "Min (default 20): " >> getLine >>= (\s -> return $ if s == "" then "20" else s) <&> (read :: String -> Integer)
-            maxD <- putStr "Max (default 50): " >> getLine >>= (\s -> return $ if s == "" then "20" else s) <&> (read :: String -> Integer)
+            minD <- putStr "Min (default 2): " >> getLine >>= (\s -> return $ if s == "" then "2" else s) <&> (read :: String -> Integer)
+            maxD <- putStr "Max (default 5): " >> getLine >>= (\s -> return $ if s == "" then "2" else s) <&> (read :: String -> Integer)
             return $ Just (minD, maxD)
         else return Nothing
     

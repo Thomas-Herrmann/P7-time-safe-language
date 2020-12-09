@@ -63,7 +63,7 @@ o4 = FixExp $ ValExp $ MatchVal $ SingleMatch (RefPat "G1") $
     ValExp $ MatchVal $ SingleMatch statePat $
         LetExp "clkX'" (AppExp (ValExp $ ConVal ResetCon) (RefExp "clkX")) $
             patLetExp (TermPat "Triple" [RefPat "x", RefPat "pSen'", RefPat "wgRec'"]) 
-                (InvarExp (ClockLCtt (Left "clkX'") 15) [] Map.empty 
+                (InvarExp (ClockLCtt (Left "clkX'") 1500) [] Map.empty 
                     (SyncExp $ MultiSync (GetSync (Left "pSen") True) (constructTuple "Triple" [ValExp $ TermVal "Zero" [], RefExp "pSen", RefExp "wgRec"]) $
                      SingleSync (ReceiveSync (Left "wgRec") "y") (constructTuple "Triple" [ValExp $ TermVal "One" [], RefExp "pSen", RefExp "wgRec"])) 
                     (constructTuple "Triple" [ValExp $ TermVal "Two" [], RefExp "pSen", RefExp "wgRec"]))
@@ -78,7 +78,7 @@ o5 = LetExp "clkY'" (AppExp (ValExp $ ConVal ResetCon) (RefExp "clkY")) $
         ValExp $ MatchVal $ SingleMatch statePat $
             patLetExp (TermPat "Triple" [RefPat "y", RefPat "pSen'", RefPat "clkX''"])
                 (LetExp "clkX'" (AppExp (ValExp $ ConVal ResetCon) (RefExp "clkX")) $
-                    InvarExp (ClockLCtt (Left "clkX'") 15) [] Map.empty 
+                    InvarExp (LandCtt (ClockLCtt (Left "clkX'") 1500) (ClockLCtt (Left "clkX'") 5500)) [] Map.empty 
                         (SyncExp $ SingleSync (GetSync (Left "pSen'") True) (constructTuple "Triple" [ValExp $ TermVal "One" [], RefExp "pSen'", RefExp "clkX'"])) 
                         (constructTuple "Triple" [ValExp $ TermVal "Two" [], RefExp "pSen'", RefExp "clkX'"]))
                 (AppExp (ValExp $ MatchVal $ 
@@ -87,9 +87,9 @@ o5 = LetExp "clkY'" (AppExp (ValExp $ ConVal ResetCon) (RefExp "clkY")) $
     where state = makeState ["clkX''", "clkY'", "pSen'", "pLig", "wgSen", "wgRec", "rSen", "rRec"]
 
 o6 = patLetExp (TermPat "Pair" [RefPat "pLig''", RefPat "clkX'''"]) (constructTuple "Pair" [SyncExp $ SingleSync (SetSync (Left "pLig'") True) (RefExp "pLig'"), AppExp (ValExp $ ConVal ResetCon) (RefExp "clkX''")]) $
-    GuardExp (SyncExp $ SingleSync (SetSync (Left "pLig''") False) (AppExp (RefExp "R1") state)) (ClockGeqCtt (Left "clkX'''") 3)
+    GuardExp (SyncExp $ SingleSync (SetSync (Left "pLig''") False) (AppExp (RefExp "R1") state)) (ClockGeqCtt (Left "clkX'''") 300)
     where state = makeState ["clkX'''", "clkY'", "pSen'", "pLig''", "wgSen", "wgRec", "rSen", "rRec"]
 
 o6' = patLetExp (TermPat "Pair" [RefPat "pLig''", RefPat "clkX'''"]) (constructTuple "Pair" [SyncExp $ SingleSync (SetSync (Left "pLig'") True) (RefExp "pLig'"), AppExp (ValExp $ ConVal ResetCon) (RefExp "clkX'")]) $
-    GuardExp (SyncExp $ SingleSync (SetSync (Left "pLig''") False) (AppExp (RefExp "R1") state)) (ClockGeqCtt (Left "clkX'''") 3)
+    GuardExp (SyncExp $ SingleSync (SetSync (Left "pLig''") False) (AppExp (RefExp "R1") state)) (ClockGeqCtt (Left "clkX'''") 300)
     where state = makeState ["clkX'''", "clkY", "pSen'", "pLig''", "wgSen", "wgRec", "rSen", "rRec"]
