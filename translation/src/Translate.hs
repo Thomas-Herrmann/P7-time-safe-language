@@ -197,7 +197,7 @@ addMinMaxLoc locs = do
     minMaxD <- State.get <&> minMaxD
     return $ case minMaxD of
         Nothing        -> locs
-        Just (_, maxD) -> Prelude.map (addInvariant $ Label InvariantKind $ clk `Text.append` " < " `Text.append` Text.pack (show maxD)) locs
+        Just (_, maxD) -> Prelude.map (addInvariant $ Label InvariantKind $ clk `Text.append` " <= " `Text.append` Text.pack (show maxD)) locs
 
 
 -- Prunes locations in the template of the specified triple,

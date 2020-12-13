@@ -30,19 +30,19 @@ data Exp = RefExp Name
          | GuardExp Exp Ctt
          | ParExp Exp Exp
          | ValExp Val
-         deriving (Eq, Ord, Show)
+         deriving (Eq, Ord, Show, Read)
          
-data MatchBody = SingleMatch Pat Exp | MultiMatch Pat Exp MatchBody deriving (Eq, Ord, Show)
+data MatchBody = SingleMatch Pat Exp | MultiMatch Pat Exp MatchBody deriving (Eq, Ord, Show, Read)
 
-data SyncBody = SingleSync Sync Exp | MultiSync Sync Exp SyncBody deriving (Eq, Ord, Show)
+data SyncBody = SingleSync Sync Exp | MultiSync Sync Exp SyncBody deriving (Eq, Ord, Show, Read)
 
-data Pat = RefPat Name | TermPat Name [Pat] deriving (Eq, Ord, Show)
+data Pat = RefPat Name | TermPat Name [Pat] deriving (Eq, Ord, Show, Read)
 
 data Sync = ReceiveSync (Either Name Val) Name 
           | SendSync (Either Name Val) Name (Maybe Val)
           | GetSync (Either Name Val) Bool
           | SetSync (Either Name Val) Bool
-          deriving (Eq, Ord, Show)
+          deriving (Eq, Ord, Show, Read)
 
 data Ctt = LandCtt Ctt Ctt 
          | LorCtt Ctt Ctt
@@ -50,7 +50,7 @@ data Ctt = LandCtt Ctt Ctt
          | ClockGeqCtt (Either Name Val) Integer --
          | ClockLCtt   (Either Name Val) Integer --
          | ClockGCtt   (Either Name Val) Integer --
-         deriving (Eq, Ord, Show)
+         deriving (Eq, Ord, Show, Read)
 
 
 negateCtt :: Ctt -> Ctt
@@ -62,7 +62,7 @@ negateCtt (ClockLCtt clk n)   = ClockGeqCtt clk n
 negateCtt (ClockGCtt clk n)   = ClockLeqCtt clk n
 
 
-data Con = ResetCon deriving (Eq, Ord, Show)
+data Con = ResetCon deriving (Eq, Ord, Show, Read)
 
 data Val = ConVal Con
          | TermVal Name [Val]
@@ -73,7 +73,7 @@ data Val = ConVal Con
          | SendVal Integer    --
          | InPinVal Integer   -- Integer corresponds to in pin ID
          | OutPinVal Integer  -- Integer corresponds to out pin ID
-         deriving (Eq, Ord, Show)
+         deriving (Eq, Ord, Show, Read)
 
 
 -- Type class representing the definitions of free variables and explicit substitutions
