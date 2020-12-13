@@ -472,6 +472,7 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
     (sVars, mRVars) <- findChannelVars body
     pVars           <- findPinVars body
     waitLoc         <- newLoc "syncWait"
+    mappedLoc       <- addMinMaxLoc [waitLoc]
     varSetTrans     <- addMinMaxEdge $ 
         if Prelude.null sVars
             then [Transition (temInit temp) (locId waitLoc) []] 
@@ -491,7 +492,7 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
                               | Prelude.null pVars                       -> [guard1]
                               | otherwise                                -> guard1 `joinLabel` guard2
                 addMinMaxEdge [Transition (locId waitLoc) (locId waitLoc) guards]
-    prune $ Prelude.foldr joinTuples (temp{ temLocations   = waitLoc : temLocations temp, 
+    prune $ Prelude.foldr joinTuples (temp{ temLocations   = mappedLoc ++ temLocations temp, 
                                             temTransitions = varSetTrans ++ resetTrans ++ temTransitions temp}, sys, Map.empty) systems
     where
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, m2 `Map.union` m1)

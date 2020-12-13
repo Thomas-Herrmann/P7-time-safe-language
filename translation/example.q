@@ -1,31 +1,36 @@
-//This file was generated from (Commercial) UPPAAL 4.0.15 rev. CB6BB307F6F681CB, November 2019
+//This file was generated from (Academic) UPPAAL 4.1.24 (rev. 29A3ECA4E5FB0808), November 2019
 
 /*
 
 */
-A<> (pSen1 imply pLig1)
+pSen1 --> pLig1
 
 /*
 
 */
-A<> pLig1
+A[] ((clkX1 > 15) and (clkX2 > 15)) imply ((not pLig1) and (not pLig2))
 
 /*
 
 */
-E<> (P_Temp0.Terminated)
+A[] (pLig1 imply (not pLig2)) and (pLig2 imply (not pLig1))
 
 /*
 
 */
-A[] ((pLig1 imply (not pLig2)) and (pLig2 imply (not pLig1)))
+A[] ((Process.x > 15) and (Process2.x > 15)) imply ((Process.green1 == false) and (Process2.green2 == false))
 
 /*
 
 */
-(P_Temp0.parInit5973 and pSen2 and pLig1)  --> pLig2
+pLig1 --> not pLig1
 
 /*
 
 */
-A[] (not deadlock)
+((not pLig1) and (not pLig2) and pSen1) --> pLig1
+
+/*
+
+*/
+A[] not deadlock
