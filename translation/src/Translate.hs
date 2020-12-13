@@ -283,16 +283,28 @@ translateCtt _ = mzero
 --     2. A system containing all other templates created from parallel compositions, as well as global declarations
 --     3. A map from values to sets of locations, marking the end locations of the constructed model, while mapping them to values
 translateExp :: Subst -> Map Name (Text, Text) -> Map Integer (Set Val) -> [([Label], Label)] -> Exp -> TransT (Template, System, Map Val (Set Text))
+
+-- values are simply represented by a single location,
+-- marked with the value name.
 translateExp _ _ _ _ (ValExp v) = do 
     state       <- State.get
     (temp, sys) <- nilSystem $ locNameFromVal (staticMap state) v
     return (temp, sys, Map.singleton v $ Set.singleton (temInit temp))
 
 -- fix has no effect unless applied, as we force it to be wrapped around abstractions!
+-- Therefore, we simply represent it by a single location.
 translateExp _ _ _ _ (FixExp (ValExp (MatchVal (SingleMatch (RefPat x) (ValExp (MatchVal body)))))) = do 
     (temp, sys) <- nilSystem "fixAbs"
     return (temp, sys, Map.singleton (RecMatchVal x body) $ Set.singleton (temInit temp))
 
+-- a reference to variable x is only valid,
+-- if we are currently translating the body of a recursive function of name x,
+-- and the reference acts as function in an application, denoting a recursive call.
+-- If this is the case, we introduce two locations:
+--     1. one to represent the recursive call.
+--     2. one to represent returning from the recursive call.
+-- We then introduce transitions from location 1 to the initial location of the function,
+-- and to location 2 from the final location of the function.
 translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map.notMember` recSubst = mzero
                                                                         | otherwise                  = do
     (temp1, sys1)            <- nilSystem $ "recRef_" `Text.append` Text.pack x `Text.append` "_"
@@ -308,6 +320,11 @@ translateExp recSubst recVars receivables inVars (AppExp (RefExp x) e2) | x `Map
     let tempRes'             = tempRes{ temTransitions = newTrans ++ temTransitions tempRes }
     prune (tempRes', sys2 `joinSys` sys1, Map.map (\_ -> Set.singleton (locId locFinal)) map1)
 
+-- for function applications, we first translate e1 and e2 in 'sequence'.
+-- We introduce variables that signify which value each expression results in.
+-- For each possible combination of v1 and v2 from e1 and e2, 
+-- we translate the body of v1 with v2 as argument, and branch based on the variables.
+-- The model constructed for each combination depends on the type of function v1 is.
 translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
     (temp1, sys1, map1) <- translateExp recSubst recVars receivables inVars e1
     (temp2, sys2, map2) <- translateExp recSubst recVars receivables inVars e2
@@ -317,6 +334,7 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
     bJoinLoc            <- newLoc "branchJoin"
     mappedLocs          <- addMinMaxLoc [branchLoc, bJoinLoc]
     case () of
+        -- we introduce 'branching' labels to transitions, as there are more than one combination of v1 and v2
         _ | Map.size map1 > 1 || Map.size map2 > 1 -> do
             (intValMap1, var1)  <- setUpVarBranch map1
             (intValMap2, var2)  <- setUpVarBranch map2
@@ -329,6 +347,7 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
                                          temTransitions = temTransitions temp3 ++ newTrans,
                                          temDecls       = varDecl : temDecls temp3 }
             prune $ Prelude.foldr joinTuples (temp3', sys1 `joinSys` sys2, Map.empty) systems
+          -- there is at most one combination of v1 and v2, so we do not need 'brancing' labels on transitions
           | otherwise -> do
             systemSets          <- Prelude.sequence [addBranchToSet (locId branchLoc) $ apply v1 v2 (locId branchLoc) (locId bJoinLoc) | v1 <- vs1, v2 <- vs2]
             let systems         = Prelude.foldr Set.union Set.empty systemSets
@@ -371,6 +390,7 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
             let varName        = "selector" `Text.append` Text.pack (show varId)
             return (intValMap, varName)
 
+        -- finds the branch expressions of a matchbody, when matched with value v
         matchBody :: MatchBody -> Val -> TransT (Set Exp)
         matchBody (SingleMatch p e) v =
             case match p v of
@@ -384,12 +404,24 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
                     set'    <- matchBody rem v
                     return $ set `Set.union` set'
 
+        -- builds the models of the possible expressions that may follow from a combination of values,
+        -- from two expressions in a function application.
+        -- There is exactly one such system for the RESET constant and for termconstructors,
+        -- but there may be multiple from abstractions, in case multiple patterns match.
         apply :: Val -> Val -> Text -> Text -> TransT (Set (Template, System, Map Val (Set Text)))
+
+        -- non recursive abstraction, return the translations of the branches that match v2
         apply (MatchVal body) v2 _ _ = do
             es      <- matchBody body v2
             systems <- Prelude.mapM (translateExp recSubst recVars receivables inVars) (Set.toList es)
             return $ Set.fromList systems
 
+        -- recursive abstraction, return the translations of the branches that match v2.
+        -- We update the recVars and recSubst arguments when translating the branches,
+        -- to correctly build the structure of a model representing a recursive function.
+        -- While the model representing an abstraction may have multiple final locations,
+        -- we introduce transitions to ensure exactly one such location,
+        -- such that all of the function branches have a transition to each location representing returning from recursive calls.
         apply fun@(RecMatchVal x body) v2 recInit recFinal = do
             es               <- matchBody body v2
             let recVars'     = Map.insert x (recInit, recFinal) recVars
@@ -403,11 +435,18 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
                     branches <- newTrans map
                     return (temp{ temTransitions = branches ++ temTransitions temp }, sys, map)) systems <&> Set.fromList
 
+        -- for termconstructors, simply introduce a single location,
+        -- representing the value of the termconstructor applied to v2.
         apply v1@(TermVal name vs) v2 _ _ = do 
             state  <- State.get
             (temp, sys) <- nilSystem $ "app" `Text.append` locNameFromVal (staticMap state) v1
             return $ Set.singleton (temp, sys, Map.singleton (TermVal name $ vs ++ [v2]) (Set.singleton (temInit temp)))
 
+        -- for the RESET constant, introduce two locations with a transition inbetween,
+        -- for which a label is introduced that resets v2.
+        -- This only works if v2 is actually a clock.
+        -- The second location is the final location, which represents the value v2,
+        -- thereby maintaining uniqueness typing.
         apply (ConVal ResetCon) v2 _ _ = do
             (temp, sys) <- nilSystem "appReset"
             finalLoc    <- newLoc "appDone"
@@ -419,6 +458,14 @@ translateExp recSubst recVars receivables inVars (AppExp e1 e2) = do
                                           temTransitions = newTrans ++ temTransitions temp }, 
                                     sys, Map.singleton v2 (Set.singleton (locId finalLoc)))
 
+-- for invariants, we first translate e1.
+-- For each location and transition of this model, we introduce uppaal invariants and guards, respectively.
+-- These are based upon g, as described in the article.
+-- Similarly, we introduce a transition from each such location to a new intermediate location, representing failing.
+-- Then, for each possible substitution sigma, with regards to the variables that may be sent/received in the invariant body,
+-- we translate e2 with sigma applied to it.
+-- To the initial location of each such translation of e2, we introduce transition from the intermediate fail location.
+-- The final locations of the complete invariant model is then all final locations of e1 and of each model for e2.
 translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     failLabels    <- translateCtt $ negateCtt g
     [guardLabel]  <- translateCtt g
@@ -452,6 +499,10 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
             ts'       <- addMinMaxEdge [Transition id (locId loc) [guard] | id <- Set.toList $ prevMap ! v]
             return (Map.unionWith Set.union (Map.singleton v (Set.singleton (locId loc))) map, ts' ++ ts, mappedLoc ++ ls)
 
+-- for let-expressions, let x = e1 in e2, we first translate e1.
+-- Then for each final location marked with some variable v,
+-- we translate e2 with x substituted for v.
+-- We introduce a transition between the corresponding final location of e1 and the initial location of the specific e2 translation.
 translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
     (temp1, sys1, map1) <- translateExp recSubst recVars receivables inVars e1
     let vs1             = Map.keys map1
@@ -466,6 +517,7 @@ translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
             (temp, sys, map') <- monad
             newTrans          <- addMinMaxEdge [Transition id (temInit temp) [] | id <- Set.toList $ map ! v]
             return (temp{ temTransitions = newTrans ++ temTransitions temp }, sys, map')
+
 
 translateExp recSubst recVars receivables inVars (SyncExp body) = do
     (temp, sys)     <- nilSystem "syncInit"
