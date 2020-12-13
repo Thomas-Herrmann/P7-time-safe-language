@@ -645,6 +645,17 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
             link             <- addClockDResetEdge [Transition from (temInit temp) labels]
             return [(temp{ temTransitions = link ++ temTransitions temp }, sys, map)]
 
+-- for guarded expressions, we introduce two new locations,
+-- for which we add a transition between guarded by the uppaal equivalent of the guard.
+-- We then translate the expression, and add a transition between the second location and the initial location of the expression,
+-- labelled with the same guard.
+-- On the second location, we introduce an uppaal invariant that holds while the guard can still be satisfied at some point.
+-- Thus, once we enter the second location, we are forced to continue with the expression, before the guard can no longer be satisfied.
+-- In case we want to constraint the delay from the first location to the second,
+-- we introduce a uppaal invariant on the first location based upon the maximum delay constraint.
+-- We then add a transition that resets the clock used for constrainting delays in this template,
+-- but that is guarded by the guard not holdning.
+-- Thus, we are forced to enter the second location before max delay after the guard is satisfied.
 translateExp recSubst recVars receivables inVars (GuardExp e g) = do
     guard            <- translateCtt g
     [Label _ invar]  <- translateCtt $ cttToInvariant g
@@ -665,6 +676,17 @@ translateExp recSubst recVars receivables inVars (GuardExp e g) = do
                  temTransitions = clockResetTrans ++ [initTrans] ++ guardBreakTrans ++ temTransitions temp, 
                  temInit        = locId initLoc }, sys, map) -- we assume that our guards do not have LOR, although syntactically possible
 
+-- for parallel compositions, we introduce two additional templates,
+-- corresponding to the subexpressions e1 and e2 translated.
+-- We use the original/root template to 'control' the templates for e1 and e2,
+-- by introducing synchronizations, such that the original template broadcasts to e1 and e2 when they should initiate.
+-- Similarly, e1 and e2 synchronize with the original template one at a time, to signify that they have finished.
+-- Once both e1 and e2 have finished, they return to their initial states to be reused,
+-- and the original template transitions to one of its final locations, based on the combination of values from e1 and e2.
+-- These final locations represent pair values.
+-- We control the branching to final locations based on global variables, one for e1 and one for e2, 
+-- such that the templates for these assign to their corresponding variable which value they ended up with.
+-- This way, we do not lose information in parallel compositions, although we have multiple templates.
 translateExp _ _ receivables inVars (ParExp e1 e2) = do
     (sendables1, sendables2) <- liftMaybe $ multiPassSends e1 e2 2
     startID                  <- nextUniqueID
@@ -691,6 +713,9 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
     where
         varText s id kind = Text.pack $ s ++ show id ++ kind
 
+        -- auxiliary function used to build a map from values to integers and a new uppaal variable,
+        -- such that we can represent values in our language by distinct integer values in uppaal, 
+        -- and thereby share information between templates.
         setUpVarBranch :: Map Val (Set Text) -> TransT (Map Val Integer, Text)
         setUpVarBranch map = do
             let (intValMap, _) = Map.foldrWithKey (\v _ (map, n) -> (Map.insert v n map, n + 1)) (Map.empty, 0) map
@@ -698,6 +723,8 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
             let varName        = "selector" `Text.append` Text.pack (show varId)
             return (intValMap, varName)
 
+        -- auxiliary function that introduces synchronizations to the subexpression of a parallel composition,
+        -- such that it can communicate with the original/root template about when to start and stop.
         addGuards temp intMap locMap var startID stopID inVars = do
             hasMinMaxD      <- getHasMinMaxD
             let forceDLabel = [Label AssignmentKind $ Text.pack $ "readyStop" ++ show stopID ++ " := 1" | hasMinMaxD ]
@@ -722,16 +749,23 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
                         then addMinMaxEdge [Transition id id [Label GuardKind $ Text.pack $ "readyStart" ++ show startID ++ " == 0"]]
                         else return []
 
+        -- auxiliary function used when a parallel composition is within an invariant body,
+        -- such that we must introduce fail-transitions for when the invariant fails.
         checkInvariant temp to inVars = do
             failTrans <- addClockDResetEdge $ Prelude.concat [[Transition from to [failLabel] | failLabel <- failLabels, from <- Prelude.map locId $ temLocations temp] | (failLabels, _) <- inVars]
             return temp{ temTransitions = temTransitions temp ++ failTrans }
 
+        -- used to convieniently check whether we want to constraint delays in the transition (optional)
         getHasMinMaxD = do
             minMaxD        <- State.get <&> minMaxD
             return $ case minMaxD of
                 Nothing -> False
                 Just _  -> True
 
+        -- similar to addGuards, but for the original/root template.
+        -- Introduces synchronizations to the template,
+        -- such that it can broadcast to the subexpression templates when to start,
+        -- and so that it can wait for the subexpressions to finish, before continuing.
         addGuardsMain temp intValMap1 var1 intValMap2 var2 startID stopID1 stopID2 = do
             hasMinMaxD             <- getHasMinMaxD
             initLoc                <- newLoc "parStart"
@@ -776,7 +810,7 @@ translateExp _ _ receivables inVars (ParExp e1 e2) = do
                     let trans = Transition from (locId loc) [label]
                     return ((TermVal "Pair" [v1, v2], loc), trans)
                                                   
-
+-- no valid pattern match, and so the expression must be semantically invalid; We fail
 translateExp _ _ _ _ _ = mzero
 
 
