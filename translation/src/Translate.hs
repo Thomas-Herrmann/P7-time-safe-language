@@ -518,7 +518,14 @@ translateExp recSubst recVars receivables inVars (LetExp x e1 e2) = do
             newTrans          <- addMinMaxEdge [Transition id (temInit temp) [] | id <- Set.toList $ map ! v]
             return (temp{ temTransitions = newTrans ++ temTransitions temp }, sys, map')
 
-
+-- for synchronization expressions, we first introduce two new locations.
+-- We add a transition between these, that assigns true to the variables, 
+-- representing the action we want to do on the channels we synchronize on in the synchronization expression.
+-- We then translate the body of the synchronization expression.
+-- In case we want to constraint delays, we introduce invariants on the locations and transitions,
+-- such that we are forced to synchronize once some other synchronization expression is ready to synchronize with us.
+-- We accomplish this by guarding on the values of the variables corresponding to the dual of the variables we assigned to previously.
+-- Upon synchronization, we reset the values of these variables, signifying we are no longer ready to synchronize.
 translateExp recSubst recVars receivables inVars (SyncExp body) = do
     (temp, sys)     <- nilSystem "syncInit"
     (sVars, mRVars) <- findChannelVars body
@@ -555,6 +562,10 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
             vars' <- findPinVars rem
             return $ vars ++ vars'
 
+        -- finds the uppaal representations of 'guarding on the value of a pin'.
+        -- For instance, if we want to sync on "pin1 == 1",
+        -- we need the dual "pin1 == 0" as a guard on the transition resetting the clock for delay constraints,
+        -- such that we may reset the clock until the pin has the value we want.
         findSyncPinVars :: Sync -> TransT [Text]
         findSyncPinVars (GetSync (Right v@(InPinVal _)) b) = do
             staticMap <- State.get <&> staticMap
@@ -566,6 +577,8 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
 
         findSyncPinVars _ = return []
         
+        -- finds a series of uppaal representations of variables, 
+        -- representing the synchronizations we want to do on channels in the specified synchronization body.
         findChannelVars :: SyncBody -> TransT ([Text], Maybe [Text])
         findChannelVars (SingleSync q _) = do
             maybeEither <- findSyncVar q
@@ -598,16 +611,20 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
         findSyncVar (SetSync (Right (OutPinVal _)) _) = return Nothing
         findSyncVar _                                 = mzero
 
-        translateBody from sVars (SingleSync q e)        = translateSyncPair from sVars q e
+        -- returns a list containing models for the branches of a synchronization expression body.
+        translateBody from sVars (SingleSync q e)    = translateSyncPair from sVars q e
         translateBody from sVars (MultiSync q e rem) = do 
             systems  <- translateSyncPair from sVars q e
             systems' <- translateBody from sVars rem
             return $ systems ++ systems'
 
+        -- returns a list containing models for the possible models for some synchronization and corresponding expression.
+        -- There may only be multiple models for receiving synchronizations,
+        -- as we may receive one of multiple values. 
         translateSyncPair from sVars q@(ReceiveSync (Right (ReceiveVal id)) x) e | id `Map.member` receivables = do
             systems                       <- Prelude.sequence [translateExp recSubst recVars receivables inVars (substitute e (Map.singleton x v)) | v <- Set.toList (receivables ! id)]
             label                         <- translateSync q
-            let labels =
+            let labels                    =
                     if Prelude.null sVars
                         then [label]
                         else joinLabel label $ Label AssignmentKind $ Text.intercalate ", " $ Prelude.map (`Text.append` " := 0") sVars
