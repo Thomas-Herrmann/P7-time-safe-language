@@ -125,7 +125,7 @@ temp1 `joinTemp` temp2 = temp1{
 joinLabel :: Label -> Label -> [Label]
 joinLabel (Label GuardKind t1) (Label GuardKind t2)           = [Label GuardKind $ t1 `Text.append` "and " `Text.append` t2]
 joinLabel (Label AssignmentKind t1) (Label AssignmentKind t2) = [Label AssignmentKind $ t1 `Text.append` ", " `Text.append` t2]
-joinLabel (Label InvariantKind t1) (Label InvariantKind t2)   = [Label InvariantKind $ t1 `Text.append` "and " `Text.append` t2]
+joinLabel (Label InvariantKind t1) (Label InvariantKind t2)   = [Label InvariantKind $ t1 `Text.append` " and " `Text.append` t2]
 joinLabel (Label SyncKind _) (Label SyncKind _)               = error "not defined"
 joinLabel l1 l2                                               = [l1, l2]
 
