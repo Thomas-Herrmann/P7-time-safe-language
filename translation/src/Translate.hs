@@ -494,8 +494,8 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     where
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, Map.unionWith Set.union m2 m1)
 
-        resetVarsLabel map locId | locId `Map.member` map = [Label AssignmentKind $ Text.intercalate ", " $ Prelude.map (`Text.append` ":= 0") $ map ! locId]
-                                 | otherwise              = []
+        resetVarsLabel map locId | locId `Map.member` map && not (Prelude.null (map ! locId)) = [Label AssignmentKind $ Text.intercalate ", " $ Prelude.map (`Text.append` " := 0") $ map ! locId]
+                                 | otherwise                                                  = []
 
         makePair guard prevMap (map, ts, ls) v = do
             state     <- State.get
