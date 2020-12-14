@@ -78,7 +78,7 @@ o5 = LetExp "clkY'" (AppExp (ValExp $ ConVal ResetCon) (RefExp "clkY")) $
         ValExp $ MatchVal $ SingleMatch statePat $
             patLetExp (TermPat "Triple" [RefPat "y", RefPat "pSen'", RefPat "clkX''"])
                 (LetExp "clkX'" (AppExp (ValExp $ ConVal ResetCon) (RefExp "clkX")) $
-                    InvarExp (LandCtt (ClockLCtt (Left "clkX'") 1500) (ClockLCtt (Left "clkX'") 5500)) [] Map.empty 
+                    InvarExp (LandCtt (ClockLCtt (Left "clkX'") 1500) (ClockLCtt (Left "clkY'") 5500)) [] Map.empty 
                         (SyncExp $ SingleSync (GetSync (Left "pSen'") True) (constructTuple "Triple" [ValExp $ TermVal "One" [], RefExp "pSen'", RefExp "clkX'"])) 
                         (constructTuple "Triple" [ValExp $ TermVal "Two" [], RefExp "pSen'", RefExp "clkX'"]))
                 (AppExp (ValExp $ MatchVal $ 
