@@ -581,33 +581,31 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
         -- representing the synchronizations we want to do on channels in the specified synchronization body.
         findChannelVars :: SyncBody -> TransT ([Text], Maybe [Text])
         findChannelVars (SingleSync q _) = do
-            maybeEither <- findSyncVar q
-            return $ case maybeEither of
+            maybePair <- findSyncVar q
+            return $ case maybePair of
                 Nothing           -> ([], Nothing)
-                Just (Left sVar)  -> (sVar, Just [])
-                Just (Right rVar) -> ([], Just rVar)
+                Just (sVar, rVar) -> (sVar, Just rVar)
 
         findChannelVars (MultiSync q _ rem) = do
-            maybeEither         <- findSyncVar q
+            maybePair           <- findSyncVar q
             (sVars, maybeRVars) <- findChannelVars rem
-            return $ case (maybeEither, maybeRVars) of
+            return $ case (maybePair, maybeRVars) of
                 (Nothing, _)                    -> (sVars, Nothing)
-                (Just (Left sVar), Nothing)     -> (sVar ++ sVars, Nothing)
-                (Just (Left sVar), Just rVars)  -> (sVar ++ sVars, Just rVars)
-                (Just (Right rVar), Just rVars) -> (sVars, Just (rVar ++ rVars))
+                (Just (sVar, rVar), Nothing)    -> (sVar ++ sVars, Nothing)
+                (Just (sVar, rVar), Just rVars) -> (sVar ++ sVars, Just $ rVar ++ rVars)
 
-        findSyncVar :: Sync -> TransT (Maybe (Either [Text] [Text]))
-        findSyncVar (ReceiveSync (Right v@(ReceiveVal _)) _) = do
-            translateStatic v -- ensure a variable exists for the channel end
+        findSyncVar :: Sync -> TransT (Maybe ([Text], [Text]))
+        findSyncVar (ReceiveSync (Right (ReceiveVal id)) _) = do
+            translateStatic $ ReceiveVal id -- ensure a variable exists for the channel end
             state <- State.get <&> channelVars 
-            return $ Just (Right [state ! v]) 
+            return $ Just ([state ! ReceiveVal id], [state ! SendVal id]) 
 
-        findSyncVar (SendSync (Right v@(SendVal _)) _ _) = do
-            translateStatic v -- ensure a variable exists for the channel end
+        findSyncVar (SendSync (Right (SendVal id)) _ _) = do
+            translateStatic $ SendVal id -- ensure a variable exists for the channel end
             state <- State.get <&> channelVars
-            return $ Just (Left [state ! v])
+            return $ Just ([state ! SendVal id], [state ! ReceiveVal id])
 
-        findSyncVar (GetSync (Right (InPinVal _)) _)  = return $ Just (Right [])
+        findSyncVar (GetSync (Right (InPinVal _)) _)  = return $ Just ([], [])
         findSyncVar (SetSync (Right (OutPinVal _)) _) = return Nothing
         findSyncVar _                                 = mzero
 

@@ -22,7 +22,7 @@ main = do
         if forceDelays
         then do 
             minD <- putStr "Min (default 2): " >> getLine >>= (\s -> return $ if s == "" then "2" else s) <&> (read :: String -> Integer)
-            maxD <- putStr "Max (default 5): " >> getLine >>= (\s -> return $ if s == "" then "2" else s) <&> (read :: String -> Integer)
+            maxD <- putStr "Max (default 5): " >> getLine >>= (\s -> return $ if s == "" then "5" else s) <&> (read :: String -> Integer)
             return $ Just (minD, maxD)
         else return Nothing
     
