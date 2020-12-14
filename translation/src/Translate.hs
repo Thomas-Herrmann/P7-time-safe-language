@@ -25,6 +25,7 @@ data TransState = TransState {
                              , locID       :: Integer                  -- The next unique integer ID for locations
                              , clockID     :: Integer                  -- The next unique integer ID for clocks used for delays
                              , channelVars :: Map Val Text             -- A map from channel ends to variables used to control delays in synchronizations
+                             , failVarLocs :: Map Text [Text]          -- A map from location identifiers to lists of variables that should be reset upon failing from the corresponding location
                              , staticMap   :: Map Val Text             -- A map from statically defined values to their UPPAAL representations
                              }
 
@@ -72,7 +73,7 @@ translate pruneFlag minMaxD e clockNames inPinNames outPinNames chanNames = do
         clockMap       = Map.fromList $ Prelude.zip (clocks 0) $ Prelude.map Text.pack clockNames
         inPinMap       = Map.fromList $ Prelude.zip (inPins 0) $ Prelude.map Text.pack inPinNames
         outPinMap      = Map.fromList $ Prelude.zip (outPins 0) $ Prelude.map Text.pack outPinNames 
-        initState      = TransState pruneFlag minMaxD ["clkD1"] 0 0 0 2 Map.empty $ clockMap `Map.union` inPinMap `Map.union` outPinMap
+        initState      = TransState pruneFlag minMaxD ["clkD1"] 0 0 0 2 Map.empty Map.empty $ clockMap `Map.union` inPinMap `Map.union` outPinMap
         e'             = substitute e $ clockSubst `Map.union` inPinsSubst `Map.union` outPinsSubst `Map.union` chanSubst
 
         -- Makes labels for edges that constraint delays
@@ -476,7 +477,8 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     (temp1, sys1, map1) <- translateExp recSubst recVars receivables ((failLabels, Label InvariantKind t) : inVars) e1 >>= prune
     let temp1'    = temp1{ temLocations   = Prelude.map (addInvariant (Label InvariantKind t)) $ temLocations temp1,
                            temTransitions = Prelude.map (addGuard guardLabel) $ temTransitions temp1 }
-    failTrans     <- addClockDResetEdge [Transition (locId loc) (locId locFail) [failLabel] | loc <- locInit : temLocations temp1, failLabel <- failLabels]
+    failVarLocs   <- State.get <&> failVarLocs
+    failTrans     <- addClockDResetEdge [Transition (locId loc) (locId locFail) ([failLabel] ++ (resetVarsLabel failVarLocs (locId loc))) | loc <- locInit : temLocations temp1, failLabel <- failLabels]
     (map1', succTrans, locs) <- foldM (makePair guardLabel map1) (Map.empty, [], []) $ Map.keys map1
     connTrans     <- addMinMaxEdge [Transition (locId locInit) (temInit temp1') []]
     let temp2     = temp1'{ temTransitions = temTransitions temp1' ++ failTrans ++ succTrans ++ connTrans,
@@ -491,6 +493,9 @@ translateExp recSubst recVars receivables inVars (InvarExp g _ subst e1 e2) = do
     prune $ Prelude.foldr joinTuples (temp2, sys1, map1') systems' 
     where
         joinTuples (t1, s1, m1) (t2, s2, m2) = (t2 `joinTemp` t1, s2 `joinSys` s1, Map.unionWith Set.union m2 m1)
+
+        resetVarsLabel map locId | locId `Map.member` map = [Label AssignmentKind $ Text.intercalate ", " $ Prelude.map (`Text.append` ":= 0") $ map ! locId]
+                                 | otherwise              = []
 
         makePair guard prevMap (map, ts, ls) v = do
             state     <- State.get
@@ -531,6 +536,7 @@ translateExp recSubst recVars receivables inVars (SyncExp body) = do
     (sVars, mRVars) <- findChannelVars body
     pVars           <- findPinVars body
     waitLoc         <- newLoc "syncWait"
+    State.get >>= \state -> State.put state{ failVarLocs = Map.insert (locId waitLoc) sVars (failVarLocs state) } -- if we enter the fail case of an invariant from this location, we must reset all sVars!
     mappedLoc       <- addMinMaxLoc [waitLoc]
     varSetTrans     <- addMinMaxEdge $ 
         if Prelude.null sVars
