@@ -884,10 +884,7 @@ translateStatic v = do
             state <- State.get
             let newBindings    = Map.fromList [(SendVal id, Text.pack ("ch" ++ show id)), (ReceiveVal id, Text.pack ("ch" ++ show id))]
             let newStaticMap   = staticMap state `Map.union` newBindings
-            let newVars        = 
-                    case minMaxD state of 
-                        Nothing -> Map.empty
-                        Just _  -> Map.fromList [(SendVal id, Text.pack ("readySend" ++ show id)), (ReceiveVal id, Text.pack ("readyReceive" ++ show id))]
+            let newVars        = Map.fromList [(SendVal id, Text.pack ("readySend" ++ show id)), (ReceiveVal id, Text.pack ("readyReceive" ++ show id))]
             let newChannelVars = channelVars state `Map.union` newVars
             State.put state{ staticMap = newStaticMap, channelVars = newChannelVars }
             return $ Text.pack ("ch" ++ show id)
